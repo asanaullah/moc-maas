@@ -58,7 +58,7 @@ The portals (`12-portal.py`) are the only custom code: one Python program that r
 ## Tested with
 
 - OpenShift 4.22.14 (Kubernetes 1.35.6)
-- Red Hat OpenShift AI 3.5.2, which installs the `InferencePool` API (`inference.networking.k8s.io`) the endpoint picker uses. None of OpenShift AI's own MaaS components are used.
+- Red Hat OpenShift AI 3.5.2, which installs the `InferencePool` API (`inference.networking.k8s.io`) the endpoint picker uses.
 
 ## Prerequisites
 
