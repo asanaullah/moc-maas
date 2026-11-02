@@ -1,0 +1,20 @@
+# Step 17: the MaaS Keycloak's public address, for users' browsers. It reaches
+# only the sidecar, which forwards /realms/maas/ and /resources/ to Keycloak.
+# GitHub sends users back here after they authorize:
+#   https://maas-sso-uat-project.apps.<domain>/realms/maas/broker/github/endpoint
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: maas-sso
+  namespace: uat-project
+  labels:
+    app.kubernetes.io/part-of: maas-test
+spec:
+  to:
+    kind: Service
+    name: maas-sso
+  port:
+    targetPort: public
+  tls:
+    termination: reencrypt
+    insecureEdgeTerminationPolicy: Redirect

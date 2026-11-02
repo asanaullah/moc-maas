@@ -1,0 +1,88 @@
+# Step 5: Limitador, the token counter. The gateway sends each request's user
+# and plan as descriptors; each plan's limit keeps one counter per user.
+# The admin portal owns the limits: it writes one per plan at startup and on
+# every plan change. Until then there are none, so start the admin portal
+# before sending traffic.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: maas-limits
+  namespace: uat-project
+  labels:
+    app.kubernetes.io/part-of: maas-test
+data:
+  limits.yaml: |
+    []
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: maas-limitador
+  namespace: uat-project
+  labels:
+    app.kubernetes.io/part-of: maas-test
+    app: maas-limitador
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: maas-limitador
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: maas-test
+        app: maas-limitador
+    spec:
+      containers:
+        - name: limitador
+          image: quay.io/kuadrant/limitador:v2.5.0
+          # The image's entrypoint is limitador-server.
+          args:
+            # Every descriptor entry (user, plan) becomes a label on Limitador's
+            # counters: tokens, calls and 429s per user and per service key.
+            - --metric-labels-default
+            - descriptors[0]
+            - /etc/limitador/limits.yaml
+            - redis
+            - redis://maas-redis:6379
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: grpc
+              containerPort: 8081
+          readinessProbe:
+            tcpSocket:
+              port: 8081
+          volumeMounts:
+            - name: limits
+              mountPath: /etc/limitador
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+      volumes:
+        - name: limits
+          configMap:
+            name: maas-limits
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: maas-limitador
+  namespace: uat-project
+  labels:
+    app.kubernetes.io/part-of: maas-test
+spec:
+  selector:
+    app: maas-limitador
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+    - name: grpc
+      port: 8081
+      targetPort: 8081
+      appProtocol: kubernetes.io/h2c

@@ -1,0 +1,144 @@
+# Step 6: the endpoint picker. It watches the InferencePool and its pods and
+# tells the gateway which emulator pod gets each request. Prefix-cache scoring
+# carries the most weight, for chat; flow control holds requests while the
+# pool is busy or at zero replicas.
+apiVersion: inference.networking.k8s.io/v1
+kind: InferencePool
+metadata:
+  name: maas-pool
+  namespace: uat-project
+  labels:
+    app.kubernetes.io/part-of: maas-test
+spec:
+  selector:
+    matchLabels:
+      app: maas-sim
+  targetPorts:
+    - number: 8000
+  endpointPickerRef:
+    name: maas-epp
+    port:
+      number: 9002
+    failureMode: FailClose
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: maas-epp-config
+  namespace: uat-project
+  labels:
+    app.kubernetes.io/part-of: maas-test
+data:
+  config.yaml: |
+    apiVersion: llm-d.ai/v1
+    kind: EndpointPickerConfig
+    featureGates: ["flowControl"]
+    plugins:
+      - type: prefix-cache-scorer
+      - type: queue-scorer
+      - type: kv-cache-utilization-scorer
+      - type: max-score-picker
+    schedulingProfiles:
+      - name: default
+        plugins:
+          - pluginRef: prefix-cache-scorer
+            weight: 3
+          - pluginRef: queue-scorer
+            weight: 1
+          - pluginRef: kv-cache-utilization-scorer
+            weight: 1
+          - pluginRef: max-score-picker
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: maas-epp
+  namespace: uat-project
+  labels:
+    app.kubernetes.io/part-of: maas-test
+    app: maas-epp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: maas-epp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: maas-test
+        app: maas-epp
+    spec:
+      # From the uat-harness chart: read access to the pool and its pods.
+      serviceAccountName: uat-epp
+      containers:
+        - name: epp
+          image: ghcr.io/llm-d/llm-d-router-endpoint-picker:v1.0.0
+          args:
+            - --pool-name=maas-pool
+            - --pool-namespace=uat-project
+            - --config-file=/etc/epp/config.yaml
+            - --grpc-port=9002
+            - --metrics-port=9090
+            # Serves gRPC over TLS with the service CA's certificate, reloaded
+            # when the service CA rotates it.
+            - --cert-path=/etc/epp-tls
+            - --enable-cert-reload
+            # Metrics auth needs token and access reviews, which are cluster
+            # scoped and not granted.
+            - --metrics-endpoint-auth=false
+            # No trace collector in this namespace; exporting only logs errors.
+            - --tracing=false
+          ports:
+            - name: grpc
+              containerPort: 9002
+            - name: grpc-health
+              containerPort: 9003
+            - name: metrics
+              containerPort: 9090
+          readinessProbe:
+            tcpSocket:
+              port: 9002
+          volumeMounts:
+            - name: config
+              mountPath: /etc/epp
+            - name: tls
+              mountPath: /etc/epp-tls
+              readOnly: true
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+      volumes:
+        - name: config
+          configMap:
+            name: maas-epp-config
+        - name: tls
+          secret:
+            secretName: maas-epp-tls
+---
+# The service CA writes a certificate for maas-epp.uat-project.svc into the
+# maas-epp-tls Secret.
+apiVersion: v1
+kind: Service
+metadata:
+  name: maas-epp
+  namespace: uat-project
+  annotations:
+    service.beta.openshift.io/serving-cert-secret-name: maas-epp-tls
+  labels:
+    app.kubernetes.io/part-of: maas-test
+    app: maas-epp
+spec:
+  selector:
+    app: maas-epp
+  ports:
+    - name: grpc
+      port: 9002
+      targetPort: 9002
+      appProtocol: kubernetes.io/h2c
+    - name: metrics
+      port: 9090
+      targetPort: 9090

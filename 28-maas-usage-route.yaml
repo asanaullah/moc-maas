@@ -1,0 +1,19 @@
+# Step 28: the user dashboard's public address,
+#   https://maas-usage-uat-project.apps.<domain>/
+# Its generated host must match the maas-usage client's redirect URI (step 26).
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: maas-usage
+  namespace: uat-project
+  labels:
+    app.kubernetes.io/part-of: maas-test
+spec:
+  to:
+    kind: Service
+    name: maas-usage
+  port:
+    targetPort: https
+  tls:
+    termination: reencrypt
+    insecureEdgeTerminationPolicy: Redirect

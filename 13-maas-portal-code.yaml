@@ -1,0 +1,1103 @@
+# Step 13: the portals' code, as a ConfigMap generated from 12-portal.py. After
+# editing 12-portal.py, regenerate this file:
+#   ./12-gen-portal-code.sh
+# 12-portal.py stays the source; don't edit the code below by hand.
+apiVersion: v1
+data:
+  portal.py: |
+    #!/usr/bin/env python3
+    """MaaS portals for the B2 test in uat-project.
+
+    MODE=admin  plans, group-to-plan mappings, service keys, every key and the
+                audit trail. Listens on the pod's localhost only, so it is reached
+                with `oc port-forward` and nothing else; every project member who
+                can port-forward is a MaaS admin of this namespace.
+    MODE=keys   users sign in through the MaaS's own Keycloak (OIDC, brokered to
+                GitHub) and request or revoke their own keys. A second port
+                answers the gateway's key checks and serves /metrics.
+    MODE=usage  the user dashboard: users sign in the same way (their own Keycloak
+                client) and see only their own usage, from Thanos and Limitador.
+
+    The admin portal also publishes plans, group mappings and the key inventory as
+    metrics, on a metrics-only port (9100); its UI stays on localhost.
+
+    Access is by Keycloak group: a user may hold keys if any of their groups maps
+    to a plan, and gets the largest token budget among those plans and the union
+    of their models. A user key records the groups it was issued under; each
+    sign-in refreshes that, and revokes the user's keys when no group qualifies.
+    Keys are random 256-bit values, stored only as SHA-256 hashes, and expire.
+    """
+    import base64
+    import hashlib
+    import html
+    import http.server
+    import json
+    import os
+    import secrets
+    import ssl
+    import sys
+    import threading
+    import time
+    import urllib.parse
+    import urllib.request
+    import uuid
+    from http import cookies
+
+    import psycopg
+    from psycopg.types.json import Jsonb
+
+    MODE = os.environ["MODE"]
+    DATABASE_URL = os.environ["DATABASE_URL"]
+    NAMESPACE = os.environ.get("NAMESPACE", "uat-project")
+    ROUTE_HOST = os.environ.get("ROUTE_HOST", "")
+    LIMITS_CONFIGMAP = os.environ.get("LIMITS_CONFIGMAP", "maas-limits")
+    API = "https://kubernetes.default.svc"
+    SA_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
+    # The realm's public issuer, as browsers and tokens see it, and the same realm
+    # through the Service name, for the portal's own (backchannel) requests.
+    OIDC_ISSUER = os.environ.get("OIDC_ISSUER", "")
+    OIDC_BACKCHANNEL = os.environ.get("OIDC_BACKCHANNEL", "")
+    OIDC_CLIENT_ID = os.environ.get("OIDC_CLIENT_ID", "maas-portal")
+    OIDC_CLIENT_SECRET = os.environ.get("OIDC_CLIENT_SECRET", "")
+    SERVICE_CA = f"{SA_DIR}/service-ca.crt"
+    THANOS_URL = os.environ.get("THANOS_URL", "http://maas-thanos-query:9090")
+    LIMITADOR_URL = os.environ.get("LIMITADOR_URL", "http://maas-limitador:8080")
+    SESSION_HOURS = 8
+    KEY_CACHE_SECONDS = 5  # fallback only; revocations clear caches at once via NOTIFY
+    PURGE_EXPIRED_KEYS_AFTER_DAYS = 90
+    NOTIFY_CHANNEL = "maas_keys"
+
+    SCHEMA = """
+    CREATE TABLE IF NOT EXISTS plans (
+      name text PRIMARY KEY,
+      models text[] NOT NULL DEFAULT '{}',
+      tokens integer NOT NULL CHECK (tokens > 0),
+      window_seconds integer NOT NULL DEFAULT 60 CHECK (window_seconds > 0),
+      max_key_days integer NOT NULL DEFAULT 90 CHECK (max_key_days > 0));
+    CREATE TABLE IF NOT EXISTS group_plans (
+      group_name text PRIMARY KEY,
+      plan text NOT NULL REFERENCES plans(name));
+    CREATE TABLE IF NOT EXISTS api_keys (
+      id uuid PRIMARY KEY,
+      kind text NOT NULL CHECK (kind IN ('user', 'service')),
+      owner text NOT NULL,
+      identity text,
+      name text NOT NULL,
+      groups text[],
+      plan text,
+      key_hash text NOT NULL UNIQUE,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      expires_at timestamptz NOT NULL,
+      revoked_at timestamptz,
+      revoked_reason text,
+      CHECK ((kind = 'user' AND groups IS NOT NULL) OR (kind = 'service' AND plan IS NOT NULL)));
+    CREATE INDEX IF NOT EXISTS api_keys_owner ON api_keys (owner);
+    -- A service key's plan is kept as history once the key is revoked or expired,
+    -- so it is not a foreign key; deleting a plan is refused while active keys use it.
+    ALTER TABLE api_keys DROP CONSTRAINT IF EXISTS api_keys_plan_fkey;
+    CREATE TABLE IF NOT EXISTS sessions (
+      id_hash text PRIMARY KEY,
+      username text NOT NULL,
+      identity text,
+      full_name text NOT NULL DEFAULT '',
+      groups text[] NOT NULL,
+      csrf text NOT NULL,
+      expires_at timestamptz NOT NULL);
+    CREATE TABLE IF NOT EXISTS oauth_pending (
+      state text PRIMARY KEY,
+      verifier text NOT NULL,
+      nonce text,
+      expires_at timestamptz NOT NULL);
+    ALTER TABLE oauth_pending ADD COLUMN IF NOT EXISTS nonce text;
+    CREATE TABLE IF NOT EXISTS audit (
+      id bigserial PRIMARY KEY,
+      at timestamptz NOT NULL DEFAULT now(),
+      actor text NOT NULL,
+      action text NOT NULL,
+      target text NOT NULL DEFAULT '',
+      details jsonb NOT NULL DEFAULT '{}');
+    """
+
+
+    def log(*args):
+        print(time.strftime("%H:%M:%S"), *args, file=sys.stderr, flush=True)
+
+
+    def db(sql, args=(), fetch=False):
+        with psycopg.connect(DATABASE_URL, autocommit=True) as conn:
+            cur = conn.execute(sql, args)
+            return cur.fetchall() if fetch else None
+
+
+    def audit(actor, action, target="", **details):
+        db("INSERT INTO audit (actor, action, target, details) VALUES (%s, %s, %s, %s)",
+           (actor, action, target, Jsonb(details)))
+
+
+    def notify(payload):
+        db("SELECT pg_notify(%s, %s)", (NOTIFY_CHANNEL, payload))
+
+
+    def wait_for_db():
+        while True:
+            try:
+                db(SCHEMA)
+                return
+            except Exception as e:  # database not up yet, or a concurrent CREATE
+                log("waiting for the database:", type(e).__name__, str(e).splitlines()[0][:120])
+                time.sleep(3)
+
+
+    def sa_token():
+        with open(f"{SA_DIR}/token") as f:
+            return f.read().strip()
+
+
+    def api_ctx():
+        return ssl.create_default_context(cafile=f"{SA_DIR}/ca.crt")
+
+
+    def kube(method, path, body=None):
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(API + path, data=data, method=method, headers={
+            "Authorization": "Bearer " + sa_token(), "Accept": "application/json",
+            "Content-Type": "application/merge-patch+json"})
+        with urllib.request.urlopen(req, context=api_ctx(), timeout=10) as r:
+            return json.loads(r.read())
+
+
+    def hash_value(v):
+        return hashlib.sha256(v.encode()).hexdigest()
+
+
+    def new_key():
+        return "maas-" + secrets.token_urlsafe(32)
+
+
+    def esc(v):
+        return html.escape(str(v))
+
+
+    def effective(groups):
+        """Plans for a set of groups: largest budget wins, models are unioned.
+        Returns (plan name, tokens, window, models, max key days, matching groups) or None."""
+        rows = db("SELECT gp.group_name, p.name, p.tokens, p.window_seconds, p.models, p.max_key_days "
+                  "FROM group_plans gp JOIN plans p ON p.name = gp.plan WHERE gp.group_name = ANY(%s) "
+                  "ORDER BY p.tokens DESC, p.name", (list(groups),), fetch=True)
+        if not rows:
+            return None
+        _, name, tokens, window, _, _ = rows[0]
+        models = set()
+        for r in rows:
+            if not r[4]:  # a plan with no model list allows every model
+                models = None
+                break
+            models.update(r[4])
+        return (name, tokens, window, sorted(models) if models is not None else [],
+                max(r[5] for r in rows), sorted({r[0] for r in rows}))
+
+
+    PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>{title}</title>
+    <style>
+    body{{font:14px system-ui,sans-serif;margin:2em auto;max-width:64em;padding:0 1em;color:#222}}
+    table{{border-collapse:collapse;width:100%;margin:.5em 0 1.5em}}
+    th,td{{border-bottom:1px solid #ddd;padding:.35em .5em;text-align:left;vertical-align:top}}
+    th{{background:#f4f4f4}} form.inline{{display:inline}} input,select{{padding:.25em}}
+    .key{{font:13px monospace;background:#eef6ee;border:1px solid #9c9;padding:.6em;word-break:break-all}}
+    .muted{{color:#777}} .err{{color:#a00}} code{{font-size:12px}}
+    </style></head><body><h1>{title}</h1>{body}</body></html>"""
+
+
+    class Base(http.server.BaseHTTPRequestHandler):
+        server_version = "maas-portal"
+
+        def log_message(self, fmt, *args):
+            log(self.address_string(), fmt % args)
+
+        def send(self, code, body, ctype="text/html; charset=utf-8", headers=()):
+            data = body.encode()
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            for k, v in headers:
+                self.send_header(k, v)
+            self.end_headers()
+            self.wfile.write(data)
+
+        def page(self, title, body, code=200, headers=()):
+            self.send(code, PAGE.format(title=esc(title), body=body), headers=headers)
+
+        def redirect(self, location, headers=()):
+            self.send_response(303)
+            self.send_header("Location", location)
+            for k, v in headers:
+                self.send_header(k, v)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def form(self):
+            n = min(int(self.headers.get("Content-Length") or 0), 64 * 1024)
+            return {k: v[0] for k, v in urllib.parse.parse_qs(self.rfile.read(n).decode()).items()}
+
+        def healthz(self):
+            try:
+                db("SELECT 1")
+                self.send(200, "ok", "text/plain")
+            except Exception as e:
+                self.send(503, f"database: {type(e).__name__}", "text/plain")
+
+
+    def key_rows(where="", args=()):
+        return db("SELECT id, kind, owner, name, groups, plan, created_at, expires_at, revoked_at, revoked_reason "
+                  f"FROM api_keys {where} ORDER BY created_at DESC LIMIT 500", args, fetch=True)
+
+
+    def key_status(expires, revoked, reason):
+        if revoked:
+            return f"revoked {revoked:%Y-%m-%d %H:%M}" + (f" ({esc(reason)})" if reason else "")
+        if expires < datetime_now():
+            return f"expired {expires:%Y-%m-%d}"
+        return f"active until {expires:%Y-%m-%d}"
+
+
+    def datetime_now():
+        return db("SELECT now()", fetch=True)[0][0]
+
+
+    def revoke(key_ids_sql, args, actor, reason):
+        """Revoke matching active keys, record it, and clear every replica's cache."""
+        rows = db(f"UPDATE api_keys SET revoked_at = now(), revoked_reason = %s WHERE revoked_at IS NULL "
+                  f"AND {key_ids_sql} RETURNING id, owner, key_hash", (reason, *args), fetch=True)
+        for kid, owner, key_hash in rows:
+            audit(actor, "key.revoke", str(kid), owner=owner, reason=reason)
+            notify(key_hash)
+        return len(rows)
+
+
+    # ── admin portal ─────────────────────────────────────────────────────────────
+
+    ADMIN_CSRF = secrets.token_urlsafe(24)
+    ADMIN_ACTOR = "admin (port-forward)"
+    ADMIN_STATUS = {"limits": ""}
+
+
+    def delete_plan(name, actor):
+        active = db("SELECT count(*) FROM api_keys WHERE kind = 'service' AND plan = %s "
+                    "AND revoked_at IS NULL AND expires_at > now()", (name,), fetch=True)[0][0]
+        if active:
+            raise ValueError(f"plan {name} still has {active} active service key(s); revoke them first")
+        db("DELETE FROM plans WHERE name = %s", (name,))  # refused by group_plans while groups use it
+        audit(actor, "plan.delete", name)
+        notify("*")
+        write_limits(actor)
+
+
+    def write_limits(actor):
+        """Make Limitador's limits match the plans. A plan without a limit there
+        would have no token budget at all."""
+        try:
+            kube("PATCH", f"/api/v1/namespaces/{NAMESPACE}/configmaps/{LIMITS_CONFIGMAP}",
+                 {"data": {"limits.yaml": limits_yaml()}})
+            audit(actor, "limits.write", LIMITS_CONFIGMAP)
+            ADMIN_STATUS["limits"] = time.strftime("written %H:%M:%S; Limitador reloads it within a minute")
+        except Exception as e:
+            log("writing limits failed:", repr(e))
+            ADMIN_STATUS["limits"] = time.strftime(f"FAILED at %H:%M:%S: {e}")
+            raise
+
+
+    def limits_yaml():
+        plans = db("SELECT name, tokens, window_seconds FROM plans ORDER BY name", fetch=True)
+        return json.dumps([{"namespace": "maas", "max_value": tokens, "seconds": window,
+                            "conditions": [f"descriptors[0]['plan'] == '{name}'"],
+                            "variables": ["descriptors[0]['user']"]}
+                           for name, tokens, window in plans], indent=1)
+
+
+    class Admin(Base):
+        def do_GET(self):
+            if self.path == "/healthz":
+                return self.healthz()
+            if self.path.startswith("/api/"):
+                return self.api_get()
+            if self.path != "/":
+                return self.send(404, "not found", "text/plain")
+            self.dashboard()
+
+        def dashboard(self, new_key=None):
+            csrf = f'<input type="hidden" name="csrf" value="{ADMIN_CSRF}">'
+            plans = db("SELECT name, models, tokens, window_seconds, max_key_days FROM plans ORDER BY name", fetch=True)
+            groups = db("SELECT group_name, plan FROM group_plans ORDER BY group_name", fetch=True)
+            b = []
+            if new_key:
+                b.append("<p><b>New service key. Copy it now; it is not shown again.</b></p>"
+                         f"<p class=key>{esc(new_key)}</p>")
+            b.append("<h2>Plans</h2><table><tr><th>Plan</th><th>Models</th><th>Tokens per window</th>"
+                     "<th>Window (s)</th><th>Max key life (days)</th><th></th></tr>")
+            for name, models, tokens, window, days in plans:
+                b.append(f"<tr><td>{esc(name)}</td><td>{esc(', '.join(models)) or '<span class=muted>all</span>'}</td>"
+                         f"<td>{tokens:,}</td><td>{window}</td><td>{days}</td><td><form class=inline method=post "
+                         f"action=/plans/delete>{csrf}<input type=hidden name=name value='{esc(name)}'>"
+                         "<button>delete</button></form></td></tr>")
+            b.append(f"</table><form method=post action=/plans>{csrf}"
+                     "<input name=name placeholder='plan name' required pattern='[a-z0-9-]+'> "
+                     "<input name=models placeholder='models, comma separated (empty = all)' size=30> "
+                     "<input name=tokens type=number min=1 placeholder=tokens required> "
+                     "<input name=window type=number min=1 value=60 required title='window seconds'> "
+                     "<input name=days type=number min=1 value=90 required title='max key life, days'> "
+                     "<button>add or update plan</button></form>")
+            b.append(f"<p><form method=post action=/limits>{csrf}<button>rewrite plan limits in Limitador</button> "
+                     f"<span class=muted>{esc(ADMIN_STATUS['limits'])}</span></form></p>")
+            opts = "".join(f"<option>{esc(p[0])}</option>" for p in plans)
+            b.append("<h2>Groups</h2><p class=muted>Members of these OpenShift groups may hold keys. A user in "
+                     "several gets the largest budget and all of their models.</p>"
+                     "<table><tr><th>OpenShift group</th><th>Plan</th><th></th></tr>")
+            for g, plan in groups:
+                b.append(f"<tr><td>{esc(g)}</td><td>{esc(plan)}</td><td><form class=inline method=post "
+                         f"action=/groups/delete>{csrf}<input type=hidden name=group value='{esc(g)}'>"
+                         "<button>remove</button></form></td></tr>")
+            b.append(f"</table><form method=post action=/groups>{csrf}<input name=group placeholder='group name' "
+                     f"required> <select name=plan required>{opts}</select> <button>map group to plan</button></form>")
+            b.append(f"<h2>Service keys</h2><p class=muted>For applications and pipelines, not people.</p>"
+                     f"<form method=post action=/service-keys>{csrf}<input name=owner placeholder='service name' "
+                     "required pattern='[a-z0-9-]+'> <input name=name placeholder='key name' required> "
+                     f"<select name=plan required>{opts}</select> <input name=days type=number min=1 value=30 "
+                     "required title='expires in days'> <button>mint service key</button></form>")
+            b.append("<h2>Keys</h2><table><tr><th>Owner</th><th>Kind</th><th>Name</th><th>Groups / plan</th>"
+                     "<th>Created</th><th>Status</th><th></th></tr>")
+            for kid, kind, owner, name, kgroups, plan, created, expires, revoked, reason in key_rows():
+                basis = esc(", ".join(kgroups)) if kind == "user" else f"plan {esc(plan)}"
+                btn = "" if revoked else (f"<form class=inline method=post action=/keys/revoke>{csrf}"
+                                          f"<input type=hidden name=id value='{kid}'><button>revoke</button></form>")
+                b.append(f"<tr><td>{esc(owner)}</td><td>{kind}</td><td>{esc(name)}</td><td>{basis}</td>"
+                         f"<td>{created:%Y-%m-%d %H:%M}</td><td>{key_status(expires, revoked, reason)}</td>"
+                         f"<td>{btn}</td></tr>")
+            b.append("</table><h2>Audit trail</h2><table><tr><th>When</th><th>Who</th><th>What</th>"
+                     "<th>Target</th><th>Details</th></tr>")
+            for at, actor, action, target, details in db(
+                    "SELECT at, actor, action, target, details FROM audit ORDER BY id DESC LIMIT 200", fetch=True):
+                b.append(f"<tr><td>{at:%Y-%m-%d %H:%M:%S}</td><td>{esc(actor)}</td><td>{esc(action)}</td>"
+                         f"<td>{esc(target)}</td><td><code>{esc(json.dumps(details))}</code></td></tr>")
+            b.append("</table>")
+            self.page("MaaS admin · " + NAMESPACE, "".join(b))
+
+        def do_POST(self):
+            if self.path.startswith("/api/"):
+                return self.api()
+            f = self.form()
+            if f.get("csrf") != ADMIN_CSRF:
+                return self.send(403, "bad form token", "text/plain")
+            a = ADMIN_ACTOR
+            try:
+                if self.path == "/plans":
+                    models = sorted({m.strip() for m in f.get("models", "").split(",") if m.strip()})
+                    name = f["name"].strip()
+                    db("INSERT INTO plans (name, models, tokens, window_seconds, max_key_days) VALUES (%s,%s,%s,%s,%s) "
+                       "ON CONFLICT (name) DO UPDATE SET models = EXCLUDED.models, tokens = EXCLUDED.tokens, "
+                       "window_seconds = EXCLUDED.window_seconds, max_key_days = EXCLUDED.max_key_days",
+                       (name, models, int(f["tokens"]), int(f["window"]), int(f["days"])))
+                    audit(a, "plan.set", name, models=models, tokens=int(f["tokens"]),
+                          window_seconds=int(f["window"]), max_key_days=int(f["days"]))
+                    notify("*")
+                    write_limits(a)
+                elif self.path == "/plans/delete":
+                    delete_plan(f["name"], a)
+                elif self.path == "/groups":
+                    db("INSERT INTO group_plans (group_name, plan) VALUES (%s, %s) "
+                       "ON CONFLICT (group_name) DO UPDATE SET plan = EXCLUDED.plan", (f["group"].strip(), f["plan"]))
+                    audit(a, "group.map", f["group"].strip(), plan=f["plan"])
+                    notify("*")
+                elif self.path == "/groups/delete":
+                    db("DELETE FROM group_plans WHERE group_name = %s", (f["group"],))
+                    audit(a, "group.unmap", f["group"])
+                    notify("*")
+                elif self.path == "/service-keys":
+                    days = int(f["days"])
+                    maxd = db("SELECT max_key_days FROM plans WHERE name = %s", (f["plan"],), fetch=True)
+                    if not maxd or days > maxd[0][0]:
+                        raise ValueError(f"plan {f['plan']} allows keys of at most {maxd[0][0] if maxd else 0} days")
+                    key, kid, owner = new_key(), uuid.uuid4(), "service:" + f["owner"].strip()
+                    db("INSERT INTO api_keys (id, kind, owner, name, plan, key_hash, expires_at) VALUES "
+                       "(%s, 'service', %s, %s, %s, %s, now() + make_interval(days => %s))",
+                       (kid, owner, f["name"].strip()[:64], f["plan"], hash_value(key), days))
+                    audit(a, "key.create", str(kid), owner=owner, kind="service", plan=f["plan"], days=days)
+                    return self.dashboard(new_key=key)
+                elif self.path == "/keys/revoke":
+                    revoke("id = %s", (f["id"],), a, "revoked by an admin")
+                elif self.path == "/limits":
+                    write_limits(a)
+                else:
+                    return self.send(404, "not found", "text/plain")
+            except psycopg.errors.ForeignKeyViolation:
+                return self.page("Not done", "<p class=err>That plan is still mapped to a group.</p>"
+                                 "<p><a href=/>back</a></p>", 409)
+            except Exception as e:
+                log("admin error:", repr(e))
+                return self.page("Error", f"<p class=err>{esc(e)}</p><p><a href=/>back</a></p>", 400)
+            self.redirect("/")
+
+
+        def api_get(self):
+            """Read-only JSON views for scripts (90-maas-admin.sh)."""
+            if self.headers.get("X-MaaS-Admin") != "1":
+                return self.send(403, json.dumps({"error": "needs X-MaaS-Admin: 1"}), "application/json")
+            if self.path == "/api/plans":
+                out = [{"name": n, "models": m, "tokens": t, "window": w, "days": d} for n, m, t, w, d in db(
+                    "SELECT name, models, tokens, window_seconds, max_key_days FROM plans ORDER BY name", fetch=True)]
+            elif self.path == "/api/groups":
+                out = [{"group": g, "plan": p} for g, p in db(
+                    "SELECT group_name, plan FROM group_plans ORDER BY group_name", fetch=True)]
+            elif self.path == "/api/keys":
+                out = [{"id": str(k), "kind": kind, "owner": o, "name": n, "groups": g, "plan": p,
+                        "created": c.isoformat(), "expires": e.isoformat(),
+                        "revoked": r.isoformat() if r else None, "reason": why}
+                       for k, kind, o, n, g, p, c, e, r, why in key_rows()]
+            elif self.path == "/api/audit":
+                out = [{"at": at.isoformat(), "actor": a, "action": act, "target": t, "details": d} for at, a, act, t, d in db(
+                    "SELECT at, actor, action, target, details FROM audit ORDER BY id DESC LIMIT 200", fetch=True)]
+            else:
+                return self.send(404, json.dumps({"error": "not found"}), "application/json")
+            self.send(200, json.dumps(out), "application/json")
+
+        def api(self):
+            """JSON admin API for scripts. A browser can't send the custom header or a
+            JSON body cross-site without a CORS preflight, which this server never
+            allows, so no form token is needed."""
+            if self.headers.get("X-MaaS-Admin") != "1" or "json" not in self.headers.get("Content-Type", ""):
+                return self.send(403, json.dumps({"error": "needs X-MaaS-Admin: 1 and a JSON body"}), "application/json")
+            n = min(int(self.headers.get("Content-Length") or 0), 64 * 1024)
+            try:
+                req = json.loads(self.rfile.read(n) or b"{}")
+                a = ADMIN_ACTOR + " api"
+                if self.path == "/api/plans":
+                    name, models = req["name"], sorted(set(req.get("models") or []))
+                    db("INSERT INTO plans (name, models, tokens, window_seconds, max_key_days) VALUES (%s,%s,%s,%s,%s) "
+                       "ON CONFLICT (name) DO UPDATE SET models = EXCLUDED.models, tokens = EXCLUDED.tokens, "
+                       "window_seconds = EXCLUDED.window_seconds, max_key_days = EXCLUDED.max_key_days",
+                       (name, models, int(req["tokens"]), int(req.get("window", 60)), int(req.get("days", 90))))
+                    audit(a, "plan.set", name, models=models, tokens=int(req["tokens"]))
+                    notify("*")
+                    write_limits(a)
+                    out = {"plan": name}
+                elif self.path == "/api/plans/delete":
+                    delete_plan(req["name"], a)
+                    out = {"deleted": req["name"]}
+                elif self.path == "/api/groups":
+                    db("INSERT INTO group_plans (group_name, plan) VALUES (%s, %s) "
+                       "ON CONFLICT (group_name) DO UPDATE SET plan = EXCLUDED.plan", (req["group"], req["plan"]))
+                    audit(a, "group.map", req["group"], plan=req["plan"])
+                    notify("*")
+                    out = {"group": req["group"], "plan": req["plan"]}
+                elif self.path == "/api/groups/delete":
+                    db("DELETE FROM group_plans WHERE group_name = %s", (req["group"],))
+                    audit(a, "group.unmap", req["group"])
+                    notify("*")
+                    out = {"unmapped": req["group"]}
+                elif self.path == "/api/limits":
+                    write_limits(a)
+                    out = {"limits": "written"}
+                elif self.path == "/api/service-keys":
+                    days = int(req.get("days", 1))
+                    maxd = db("SELECT max_key_days FROM plans WHERE name = %s", (req["plan"],), fetch=True)
+                    if not maxd or days > maxd[0][0]:
+                        raise ValueError(f"plan {req['plan']} doesn't exist or allows fewer than {days} days")
+                    key, kid, owner = new_key(), uuid.uuid4(), "service:" + req["owner"]
+                    db("INSERT INTO api_keys (id, kind, owner, name, plan, key_hash, expires_at) VALUES "
+                       "(%s, 'service', %s, %s, %s, %s, now() + make_interval(days => %s))",
+                       (kid, owner, str(req.get("name", "key"))[:64], req["plan"], hash_value(key), days))
+                    audit(a, "key.create", str(kid), owner=owner, kind="service", plan=req["plan"], days=days)
+                    out = {"id": str(kid), "key": key}
+                elif self.path == "/api/keys/revoke":
+                    out = {"revoked": revoke("id = %s", (req["id"],), a, "revoked by an admin script")}
+                else:
+                    return self.send(404, json.dumps({"error": "not found"}), "application/json")
+            except psycopg.errors.ForeignKeyViolation:
+                return self.send(409, json.dumps({"error": "plan still mapped to a group"}), "application/json")
+            except Exception as e:
+                log("admin api error:", repr(e))
+                return self.send(400, json.dumps({"error": str(e)}), "application/json")
+            self.send(200, json.dumps(out), "application/json")
+
+
+    # ── key portal ───────────────────────────────────────────────────────────────
+
+    OIDC = {}
+
+
+    def oidc_ctx():
+        return ssl.create_default_context(cafile=SERVICE_CA)
+
+
+    def discover_oidc():
+        """Endpoints from the realm's discovery document, fetched over the Service.
+        Keycloak names the browser endpoints with its public hostname and the
+        backchannel ones with the host it was asked on."""
+        url = OIDC_BACKCHANNEL.rstrip("/") + "/.well-known/openid-configuration"
+        with urllib.request.urlopen(url, context=oidc_ctx(), timeout=10) as r:
+            OIDC.update(json.loads(r.read()))
+        if OIDC["issuer"] != OIDC_ISSUER:
+            raise RuntimeError(f"realm issuer is {OIDC['issuer']}, expected {OIDC_ISSUER}")
+        log("OIDC issuer:", OIDC["issuer"])
+
+
+    def redirect_uri():
+        return f"https://{ROUTE_HOST}/callback"
+
+
+    def b64url_json(part):
+        return json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
+
+
+    def exchange_code(code, verifier, nonce):
+        """Trade the code for tokens and return the ID token's claims.
+
+        The ID token comes straight from the token endpoint over TLS, verified
+        against the service CA, so its issuer is authenticated by TLS (OIDC Core
+        3.1.3.7) and its signature need not be checked again; its issuer, audience,
+        expiry and nonce are."""
+        body = urllib.parse.urlencode({
+            "grant_type": "authorization_code", "code": code, "redirect_uri": redirect_uri(),
+            "code_verifier": verifier}).encode()
+        basic = base64.b64encode(f"{OIDC_CLIENT_ID}:{OIDC_CLIENT_SECRET}".encode()).decode()
+        req = urllib.request.Request(OIDC["token_endpoint"], data=body, headers={
+            "Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json",
+            "Authorization": "Basic " + basic})
+        with urllib.request.urlopen(req, context=oidc_ctx(), timeout=15) as r:
+            tokens = json.loads(r.read())
+        claims = b64url_json(tokens["id_token"].split(".")[1])
+        aud = claims.get("aud")
+        if claims.get("iss") != OIDC_ISSUER:
+            raise ValueError("ID token from an unexpected issuer")
+        if OIDC_CLIENT_ID not in (aud if isinstance(aud, list) else [aud]):
+            raise ValueError("ID token not issued to this portal")
+        if claims.get("exp", 0) < time.time():
+            raise ValueError("ID token expired")
+        if not nonce or not secrets.compare_digest(str(claims.get("nonce", "")), nonce):
+            raise ValueError("ID token nonce doesn't match this sign-in")
+        if not claims.get("email") or claims.get("email_verified") is not True:
+            raise ValueError("your account has no verified email address")
+        return claims
+
+
+    def reconcile(username, groups):
+        """At sign-in: keep the user's active keys in step with their current groups."""
+        eff = effective(groups)
+        if not eff:
+            return revoke("kind = 'user' AND owner = %s", (username,), username, "no longer in an allowed group")
+        db("UPDATE api_keys SET groups = %s WHERE kind = 'user' AND owner = %s AND revoked_at IS NULL",
+           (eff[5], username))
+        notify("*")
+        return 0
+
+
+    class Keys(Base):
+        def session(self):
+            c = cookies.SimpleCookie(self.headers.get("Cookie", ""))
+            if "maas_session" not in c:
+                return None, None
+            h = hash_value(c["maas_session"].value)
+            rows = db("SELECT username, identity, full_name, groups, csrf FROM sessions "
+                      "WHERE id_hash = %s AND expires_at > now()", (h,), fetch=True)
+            if not rows:
+                return None, None
+            u, ident, name, groups, csrf = rows[0]
+            return h, {"username": u, "identity": ident, "name": name, "groups": groups, "csrf": csrf}
+
+        def do_GET(self):
+            path = urllib.parse.urlparse(self.path)
+            if path.path == "/login":
+                return self.login()
+            if path.path == "/callback":
+                return self.callback(urllib.parse.parse_qs(path.query))
+            if path.path != "/":
+                return self.send(404, "not found", "text/plain")
+            _, s = self.session()
+            if not s:
+                return self.page("MaaS keys", "<p>Sign in to manage your MaaS API keys.</p>"
+                                 "<p><a href=/login><button>Sign in with GitHub</button></a></p>")
+            self.home(s)
+
+        def home(self, s, new_key=None, error=None):
+            csrf = f"<input type=hidden name=csrf value='{s['csrf']}'>"
+            out = (f"<p>Signed in as <b>{esc(s['username'])}</b> {esc(s['name'])} <form class=inline method=post "
+                   f"action=/logout>{csrf}<button>sign out</button></form></p>")
+            eff = effective(s["groups"])
+            if not eff:
+                return self.page("MaaS keys", out + "<p class=err>None of your groups has access to this MaaS. "
+                                 "Ask the namespace's members to map one of your groups to a plan.</p>", 403)
+            plan, tokens, window, models, maxd, via = eff
+            out += (f"<p>Through {esc(', '.join(via))}: plan <b>{esc(plan)}</b>, {tokens:,} tokens per {window}s, "
+                    f"models: {esc(', '.join(models)) or 'all'}. Keys last up to {maxd} days.</p>")
+            if error:
+                out += f"<p class=err>{esc(error)}</p>"
+            if new_key:
+                out += ("<p><b>Your new key. Copy it now; it is not shown again.</b></p>"
+                        f"<p class=key>{esc(new_key)}</p>")
+            out += "<h2>Your keys</h2><table><tr><th>Name</th><th>Created</th><th>Status</th><th></th></tr>"
+            for kid, _, _, name, _, _, created, expires, revoked, reason in key_rows(
+                    "WHERE kind = 'user' AND owner = %s", (s["username"],)):
+                btn = "" if revoked else (f"<form class=inline method=post action=/keys/revoke>{csrf}"
+                                          f"<input type=hidden name=id value='{kid}'><button>revoke</button></form>")
+                out += (f"<tr><td>{esc(name)}</td><td>{created:%Y-%m-%d %H:%M}</td>"
+                        f"<td>{key_status(expires, revoked, reason)}</td><td>{btn}</td></tr>")
+            out += (f"</table><form method=post action=/keys>{csrf}<input name=name placeholder='key name, e.g. "
+                    f"laptop' required> expires in <input name=days type=number min=1 max={maxd} value={min(30, maxd)} "
+                    "required> days <button>create key</button></form>")
+            self.page("MaaS keys", out)
+
+        def login(self):
+            state, verifier, nonce = secrets.token_urlsafe(24), secrets.token_urlsafe(48), secrets.token_urlsafe(24)
+            challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+            db("INSERT INTO oauth_pending (state, verifier, nonce, expires_at) "
+               "VALUES (%s, %s, %s, now() + interval '10 minutes')", (state, verifier, nonce))
+            # kc_idp_hint sends users straight to GitHub, past Keycloak's login form.
+            q = urllib.parse.urlencode({"client_id": OIDC_CLIENT_ID, "response_type": "code",
+                                        "scope": "openid email profile", "redirect_uri": redirect_uri(),
+                                        "state": state, "nonce": nonce, "kc_idp_hint": "github",
+                                        "code_challenge": challenge, "code_challenge_method": "S256"})
+            self.redirect(OIDC["authorization_endpoint"] + "?" + q)
+
+        def callback(self, q):
+            state, code = (q.get("state") or [""])[0], (q.get("code") or [""])[0]
+            rows = db("DELETE FROM oauth_pending WHERE state = %s AND expires_at > now() RETURNING verifier, nonce",
+                      (state,), fetch=True)
+            if q.get("error"):
+                return self.page("Sign-in cancelled", f"<p class=err>{esc(q['error'][0])}</p>"
+                                 "<p><a href=/>start again</a></p>", 400)
+            if not rows or not code:
+                return self.page("Sign-in failed", "<p class=err>The sign-in expired or was not started here.</p>"
+                                 "<p><a href=/>start again</a></p>", 400)
+            try:
+                claims = exchange_code(code, rows[0][0], rows[0][1])
+                username, identity = claims["email"].lower(), claims["sub"]
+                name, groups = claims.get("name") or claims.get("preferred_username") or "", claims.get("groups") or []
+            except Exception as e:
+                log("sign-in error:", repr(e))
+                return self.page("Sign-in failed", f"<p class=err>{esc(e)}</p><p><a href=/>start again</a></p>", 502)
+            sid = secrets.token_urlsafe(32)
+            db("INSERT INTO sessions (id_hash, username, identity, full_name, groups, csrf, expires_at) "
+               "VALUES (%s, %s, %s, %s, %s, %s, now() + make_interval(hours => %s))",
+               (hash_value(sid), username, identity, name, groups, secrets.token_urlsafe(24), SESSION_HOURS))
+            revoked = reconcile(username, groups)
+            audit(username, "login", username, identity=identity, groups=groups, keys_revoked=revoked)
+            log("signed in:", username)
+            self.redirect("/", headers=[("Set-Cookie", f"maas_session={sid}; Path=/; Secure; HttpOnly; "
+                                         f"SameSite=Lax; Max-Age={SESSION_HOURS * 3600}")])
+
+        def do_POST(self):
+            sid_hash, s = self.session()
+            f = self.form()
+            if not s or not secrets.compare_digest(f.get("csrf", ""), s["csrf"]):
+                return self.send(403, "sign in again", "text/plain")
+            if self.path == "/logout":
+                db("DELETE FROM sessions WHERE id_hash = %s", (sid_hash,))
+                audit(s["username"], "logout", s["username"])
+                # Also end the Keycloak session, then come back here.
+                end = OIDC.get("end_session_endpoint")
+                target = (end + "?" + urllib.parse.urlencode({"client_id": OIDC_CLIENT_ID,
+                                                              "post_logout_redirect_uri": f"https://{ROUTE_HOST}/"})
+                          if end else "/")
+                return self.redirect(target, headers=[("Set-Cookie", "maas_session=; Path=/; Max-Age=0; Secure; HttpOnly")])
+            eff = effective(s["groups"])
+            if not eff:
+                return self.send(403, "none of your groups has access to this MaaS", "text/plain")
+            if self.path == "/keys":
+                try:
+                    days = int(f.get("days", "0"))
+                except ValueError:
+                    days = 0
+                if not 1 <= days <= eff[4]:
+                    return self.home(s, error=f"Keys may last 1 to {eff[4]} days.")
+                key, kid = new_key(), uuid.uuid4()
+                db("INSERT INTO api_keys (id, kind, owner, identity, name, groups, key_hash, expires_at) VALUES "
+                   "(%s, 'user', %s, %s, %s, %s, %s, now() + make_interval(days => %s))",
+                   (kid, s["username"], s["identity"], (f.get("name") or "key").strip()[:64], eff[5],
+                    hash_value(key), days))
+                audit(s["username"], "key.create", str(kid), owner=s["username"], kind="user", groups=eff[5], days=days)
+                return self.home(s, new_key=key)
+            if self.path == "/keys/revoke":
+                revoke("id = %s AND kind = 'user' AND owner = %s", (f.get("id"), s["username"]),
+                       s["username"], "revoked by its owner")
+                return self.redirect("/")
+            self.send(404, "not found", "text/plain")
+
+
+    def promql_str(v):
+        return '"' + str(v).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+    def prom(path, **params):
+        url = THANOS_URL.rstrip("/") + path + "?" + urllib.parse.urlencode(params)
+        with urllib.request.urlopen(url, timeout=15) as r:
+            d = json.loads(r.read())
+        if d.get("status") != "success":
+            raise RuntimeError(d.get("error", "query failed"))
+        return d["data"]["result"]
+
+
+    def scalar(q):
+        try:
+            res = prom("/api/v1/query", query=q)
+            return float(res[0]["value"][1]) if res else 0.0
+        except Exception as e:
+            log("usage query failed:", repr(e)[:160])
+            return None
+
+
+    def bars_svg(points, width=640, height=160):
+        """A small bar chart of [(unix time, value)], drawn server-side."""
+        if not points:
+            return "<p class=muted>No usage recorded yet.</p>"
+        top = max(v for _, v in points) or 1
+        bw = width / len(points)
+        out = [f'<svg viewBox="0 0 {width} {height + 24}" width="100%" role="img" aria-label="tokens per day">']
+        for i, (t, v) in enumerate(points):
+            h = (v / top) * height
+            out.append(f'<rect x="{i * bw + 1:.1f}" y="{height - h:.1f}" width="{max(bw - 2, 1):.1f}" height="{h:.1f}" '
+                       f'fill="#5b7fb8"><title>{time.strftime("%Y-%m-%d", time.gmtime(t))}: {int(v):,} tokens</title></rect>')
+        out.append(f'<text x="0" y="{height + 18}" font-size="11" fill="#777">'
+                   f'{time.strftime("%b %d", time.gmtime(points[0][0]))}</text>')
+        out.append(f'<text x="{width}" y="{height + 18}" font-size="11" fill="#777" text-anchor="end">'
+                   f'{time.strftime("%b %d", time.gmtime(points[-1][0]))} · peak {int(top):,}</text></svg>')
+        return "".join(out)
+
+
+    CHECKS = {}  # (owner, plan, result) -> count, for /metrics
+    CHECKS_LOCK = threading.Lock()
+
+
+    def count_check(result, headers=None):
+        h = dict(headers or [])
+        k = (h.get("x-maas-user", ""), h.get("x-maas-plan", ""), result)
+        with CHECKS_LOCK:
+            CHECKS[k] = CHECKS.get(k, 0) + 1
+
+
+    def label(v):
+        return str(v).replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
+
+
+    def exposition(families):
+        """Prometheus text format from [(name, type, help, [(labels dict, value)])]."""
+        out = []
+        for name, typ, help_, samples in families:
+            out += [f"# HELP {name} {help_}", f"# TYPE {name} {typ}"]
+            for labels, value in samples:
+                ls = ",".join(f'{k}="{label(v)}"' for k, v in labels.items())
+                out.append(f"{name}{{{ls}}} {value}" if ls else f"{name} {value}")
+        return "\n".join(out) + "\n"
+
+
+    class Usage(Keys):
+        """The user dashboard. Every query is built here and fixed to the signed-in
+        user; nothing the browser sends ends up in a query."""
+
+        TITLE = "MaaS usage"
+
+        def do_GET(self):
+            path = urllib.parse.urlparse(self.path)
+            if path.path in ("/login", "/callback"):
+                return Keys.do_GET(self)
+            if path.path != "/":
+                return self.send(404, "not found", "text/plain")
+            _, s = self.session()
+            if not s:
+                return self.page(self.TITLE, "<p>Sign in to see your MaaS usage.</p>"
+                                 "<p><a href=/login><button>Sign in with GitHub</button></a></p>")
+            self.home(s)
+
+        def home(self, s, new_key=None, error=None):
+            csrf = f"<input type=hidden name=csrf value='{s['csrf']}'>"
+            out = (f"<p>Signed in as <b>{esc(s['username'])}</b> {esc(s['name'])} <form class=inline method=post "
+                   f"action=/logout>{csrf}<button>sign out</button></form></p>")
+            eff = effective(s["groups"])
+            if not eff:
+                return self.page(self.TITLE, out + "<p class=err>None of your groups has access to this MaaS.</p>", 403)
+            plan, tokens, window, models, maxd, via = eff
+            u = promql_str(s["username"])
+            # This window, live from Limitador's own counter for this user and plan.
+            used, left_s = 0, None
+            try:
+                for c in json.loads(urllib.request.urlopen(LIMITADOR_URL + "/counters/maas", timeout=5).read()):
+                    if (c.get("set_variables") or {}).get("descriptors[0]['user']") == s["username"] and \
+                            f"descriptors[0]['plan'] == '{plan}'" in c["limit"].get("conditions", []):
+                        rem = c["remaining"]
+                        rem = rem - 2**64 if rem >= 2**63 else rem
+                        used, left_s = c["limit"]["max_value"] - rem, c.get("expires_in_seconds")
+            except Exception as e:
+                log("limitador counters:", repr(e)[:120])
+            frac = min(used / tokens, 1) if tokens else 0
+            out += (f"<h2>This window</h2><p>Plan <b>{esc(plan)}</b>: {tokens:,} tokens per {window}s, models "
+                    f"{esc(', '.join(models)) or 'all'}.</p>"
+                    f'<div style="background:#eee;border-radius:4px;height:14px;width:100%;max-width:640px">'
+                    f'<div style="background:{"#c0392b" if used >= tokens else "#5b7fb8"};height:14px;border-radius:4px;'
+                    f'width:{frac * 100:.1f}%"></div></div>'
+                    f"<p>{used:,} of {tokens:,} tokens used" + (f"; window resets in {left_s}s" if left_s else "") + ".</p>")
+            day = {k: scalar(q) for k, q in (
+                ("tokens", f"sum(increase(authorized_hits{{user={u}}}[1d]))"),
+                ("requests", f"sum(increase(report_calls{{user={u}}}[1d]))"),
+                ("refused", f"sum(increase(limited_calls{{user={u}}}[1d]))"),
+                ("ttft", f"histogram_quantile(0.5, sum by (le) (rate(llm_d_epp_request_ttft_seconds_bucket{{fairness_id={u}}}[1d])))"))}
+            fmt = lambda v, f="{:,.0f}": "–" if v is None or v != v else f.format(v)
+            out += ("<h2>Last 24 hours</h2><table><tr><th>Tokens</th><th>Requests</th><th>Refused (429)</th>"
+                    "<th>Median time to first token</th></tr>"
+                    f"<tr><td>{fmt(day['tokens'])}</td><td>{fmt(day['requests'])}</td><td>{fmt(day['refused'])}</td>"
+                    f"<td>{fmt(day['ttft'], '{:.2f} s')}</td></tr></table>")
+            try:
+                end = int(time.time()) // 86400 * 86400 + 86400
+                res = prom("/api/v1/query_range", query=f"sum(increase(authorized_hits{{user={u}}}[1d]))",
+                           start=end - 30 * 86400, end=end, step=86400)
+                pts = [(int(t), float(v)) for t, v in res[0]["values"]] if res else []
+            except Exception as e:
+                log("usage range query:", repr(e)[:160])
+                pts = []
+            out += "<h2>Tokens per day, last 30 days</h2>" + bars_svg(pts)
+            out += "<h2>Your keys</h2><table><tr><th>Name</th><th>Created</th><th>Status</th></tr>"
+            for kid, _, _, name, _, _, created, expires, revoked, reason in key_rows(
+                    "WHERE kind = 'user' AND owner = %s", (s["username"],)):
+                out += (f"<tr><td>{esc(name)}</td><td>{created:%Y-%m-%d %H:%M}</td>"
+                        f"<td>{key_status(expires, revoked, reason)}</td></tr>")
+            out += "</table><p class=muted>Manage keys in the key portal.</p>"
+            self.page(self.TITLE, out)
+
+        def do_POST(self):
+            if self.path != "/logout":
+                return self.send(404, "not found", "text/plain")
+            return Keys.do_POST(self)
+
+
+    CACHE = {}  # key hash -> (expires, headers or None)
+    CACHE_LOCK = threading.Lock()
+
+
+    def listen_for_revocations():
+        """Drop cached key checks the moment a key is revoked or plans change."""
+        while True:
+            try:
+                with psycopg.connect(DATABASE_URL, autocommit=True) as conn:
+                    conn.execute(f"LISTEN {NOTIFY_CHANNEL}")
+                    log("listening for key changes")
+                    for n in conn.notifies():
+                        with CACHE_LOCK:
+                            if n.payload == "*":
+                                CACHE.clear()
+                            else:
+                                CACHE.pop(n.payload, None)
+            except Exception as e:
+                log("revocation listener:", repr(e), "- reconnecting")
+                with CACHE_LOCK:
+                    CACHE.clear()
+                time.sleep(3)
+
+
+    def lookup(key_hash):
+        rows = db("SELECT kind, owner, groups, plan FROM api_keys WHERE key_hash = %s "
+                  "AND revoked_at IS NULL AND expires_at > now()", (key_hash,), fetch=True)
+        if not rows:
+            return None
+        kind, owner, groups, plan = rows[0]
+        if kind == "service":
+            p = db("SELECT models FROM plans WHERE name = %s", (plan,), fetch=True)
+            if not p:
+                return None
+            models = p[0][0]
+        else:
+            eff = effective(groups)
+            if not eff:
+                return None
+            plan, models = eff[0], eff[3]
+        # The picker labels its metrics, and shares capacity, by this ID.
+        return [("x-maas-user", owner), ("x-maas-plan", plan), ("x-maas-models", ",".join(models)),
+                ("x-llm-d-inference-fairness-id", owner)]
+
+
+    class Validate(Base):
+        """Answers the gateway's ext_authz checks under /check: 200 with identity
+        headers, 401 for a bad key, 403 for a model outside the key's plan. The
+        gateway prefixes every client path with /check, so a client can't reach
+        /healthz through it."""
+
+        def check(self):
+            if self.path == "/healthz" and self.command == "GET":
+                return self.healthz()
+            if self.path == "/metrics" and self.command == "GET":
+                with CHECKS_LOCK:
+                    samples = [({"owner": o, "plan": p, "result": r}, n) for (o, p, r), n in sorted(CHECKS.items())]
+                return self.send(200, exposition([("maas_key_checks_total", "counter",
+                                                    "Key checks answered for the gateway, by key owner, plan and result.",
+                                                    samples)]), "text/plain; version=0.0.4")
+            if not (self.path == "/check" or self.path.startswith("/check/")):
+                return self.send(404, "not found", "text/plain")
+            n = min(int(self.headers.get("Content-Length") or 0), 8 * 1024 * 1024)
+            body = self.rfile.read(n) if n else b""
+            auth = self.headers.get("Authorization", "")
+            if not auth.startswith("Bearer maas-"):
+                count_check("missing")
+                return self.send(401, "missing key", "text/plain")
+            h = hash_value(auth[7:].strip())
+            now = time.time()
+            with CACHE_LOCK:
+                hit = CACHE.get(h)
+            if not hit or hit[0] < now:
+                hit = (now + KEY_CACHE_SECONDS, lookup(h))
+                with CACHE_LOCK:
+                    CACHE[h] = hit
+            if not hit[1]:
+                count_check("invalid")
+                return self.send(401, "invalid, expired or revoked key", "text/plain")
+            models = dict(hit[1])["x-maas-models"]
+            if body and models:
+                try:
+                    model = json.loads(body).get("model")
+                except (ValueError, AttributeError):
+                    return self.send(400, "request body is not a JSON object", "text/plain")
+                if model not in models.split(","):
+                    count_check("model_denied", hit[1])
+                    return self.send(403, f"model {model!r} is not in your plan", "text/plain")
+            count_check("ok", hit[1])
+            self.send(200, "ok", "text/plain", headers=hit[1])
+
+        do_GET = do_POST = check
+
+
+    class AdminMetrics(Base):
+        """The admin portal's metrics-only port: plans, group mappings and the key
+        inventory, read from the database on each scrape. Nothing else is served."""
+
+        def do_GET(self):
+            if self.path == "/healthz":
+                return self.healthz()
+            if self.path != "/metrics":
+                return self.send(404, "not found", "text/plain")
+            plans = db("SELECT name, tokens, window_seconds, max_key_days, models FROM plans ORDER BY name", fetch=True)
+            groups = db("SELECT group_name, plan FROM group_plans ORDER BY group_name", fetch=True)
+            keys = db("SELECT id, kind, owner, name, groups, plan, extract(epoch FROM expires_at), "
+                      "revoked_at IS NOT NULL, expires_at < now() FROM api_keys ORDER BY created_at", fetch=True)
+            info, expiry, counts = [], [], {}
+            for kid, kind, owner, name, kgroups, plan, exp, revoked, expired in keys:
+                if kind == "user":
+                    eff = effective(kgroups or [])
+                    plan = eff[0] if eff else ""
+                status = "revoked" if revoked else "expired" if expired else "active"
+                info.append(({"key_id": kid, "kind": kind, "owner": owner, "name": name, "plan": plan or "",
+                              "status": status}, 1))
+                expiry.append(({"key_id": kid, "owner": owner}, int(exp)))
+                counts[(kind, status)] = counts.get((kind, status), 0) + 1
+            body = exposition([
+                ("maas_plan_budget_tokens", "gauge", "Each plan's token budget per window, per user.",
+                 [({"plan": n}, t) for n, t, w, d, m in plans]),
+                ("maas_plan_window_seconds", "gauge", "Each plan's budget window.",
+                 [({"plan": n}, w) for n, t, w, d, m in plans]),
+                ("maas_plan_max_key_days", "gauge", "Each plan's longest allowed key life.",
+                 [({"plan": n}, d) for n, t, w, d, m in plans]),
+                ("maas_plan_models", "gauge", "Models each plan allows (empty: all).",
+                 [({"plan": n, "models": ",".join(m)}, 1) for n, t, w, d, m in plans]),
+                ("maas_group_plan", "gauge", "Keycloak groups mapped to plans.",
+                 [({"group": g, "plan": p}, 1) for g, p in groups]),
+                ("maas_key_info", "gauge", "Every key: owner, kind (user or service), plan now in force, status.", info),
+                ("maas_key_expiry_timestamp_seconds", "gauge", "When each key expires.", expiry),
+                ("maas_keys", "gauge", "Keys by kind and status.",
+                 [({"kind": k, "status": st}, n) for (k, st), n in sorted(counts.items())]),
+            ])
+            self.send(200, body, "text/plain; version=0.0.4")
+
+
+    class Health(Base):
+        def do_GET(self):
+            if self.path == "/healthz":
+                return self.healthz()
+            self.send(404, "not found", "text/plain")
+
+
+    def housekeeping():
+        while True:
+            try:
+                db("DELETE FROM sessions WHERE expires_at < now()")
+                db("DELETE FROM oauth_pending WHERE expires_at < now()")
+                n = db("DELETE FROM api_keys WHERE expires_at < now() - make_interval(days => %s) RETURNING id",
+                       (PURGE_EXPIRED_KEYS_AFTER_DAYS,), fetch=True)
+                if n:
+                    audit("housekeeping", "key.purge", "", count=len(n))
+            except Exception as e:
+                log("housekeeping:", repr(e))
+            time.sleep(3600)
+
+
+    class Server(http.server.ThreadingHTTPServer):
+        tls = None
+
+        def finish_request(self, request, client_address):
+            # The TLS handshake runs in the connection's own thread, with a
+            # timeout, so a stalled client can't hold up everyone else.
+            if self.tls:
+                request.settimeout(30)
+                try:
+                    request = self.tls.wrap_socket(request, server_side=True)
+                except (OSError, ssl.SSLError):
+                    return  # a health check or stray client that hung up
+            try:
+                super().finish_request(request, client_address)
+            finally:
+                if self.tls:
+                    request.close()
+
+        def handle_error(self, request, client_address):
+            # A client leaving mid-request isn't an error worth a traceback.
+            if isinstance(sys.exc_info()[1], (ConnectionError, TimeoutError, ssl.SSLError)):
+                return
+            super().handle_error(request, client_address)
+
+
+    def serve(handler, host, port, tls=False):
+        srv = Server((host, port), handler)
+        if tls:
+            srv.tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            srv.tls.minimum_version = ssl.TLSVersion.TLSv1_2
+            srv.tls.load_cert_chain("/etc/tls/tls.crt", "/etc/tls/tls.key")
+        log(f"{handler.__name__} listening on {host}:{port}{' (TLS)' if tls else ''}")
+        return srv
+
+
+    def main():
+        wait_for_db()
+        if MODE == "admin":
+            try:
+                write_limits("admin startup")
+            except Exception:
+                log("limits not written at startup; the admin portal shows the error")
+            threading.Thread(target=serve(AdminMetrics, "0.0.0.0", 9100).serve_forever, daemon=True).start()
+            serve(Admin, "127.0.0.1", 8080).serve_forever()
+        elif MODE in ("keys", "usage"):
+            missing = [n for n in ("ROUTE_HOST", "OIDC_ISSUER", "OIDC_BACKCHANNEL", "OIDC_CLIENT_SECRET")
+                       if not globals()[n]]
+            if missing:
+                sys.exit("required: " + ", ".join(missing))
+            while True:  # Keycloak may still be starting
+                try:
+                    discover_oidc()
+                    break
+                except Exception as e:
+                    log("waiting for Keycloak:", repr(e)[:160])
+                    time.sleep(5)
+            if MODE == "usage":
+                threading.Thread(target=serve(Health, "0.0.0.0", 8081).serve_forever, daemon=True).start()
+                serve(Usage, "0.0.0.0", 8443, tls=True).serve_forever()
+            for target in (listen_for_revocations, housekeeping):
+                threading.Thread(target=target, daemon=True).start()
+            threading.Thread(target=serve(Validate, "0.0.0.0", 8081).serve_forever, daemon=True).start()
+            serve(Keys, "0.0.0.0", 8443, tls=True).serve_forever()
+        else:
+            sys.exit(f"unknown MODE {MODE}")
+
+
+    if __name__ == "__main__":
+        main()
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/part-of: maas-test
+  name: maas-portal-code
+  namespace: uat-project

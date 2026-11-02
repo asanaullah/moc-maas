@@ -1,0 +1,19 @@
+# Step 20: where the MaaS's long-term metrics live. Thanos's filesystem object
+# store, a folder on uat-project-storage (maas/metrics), the same volume the
+# databases use. The Prometheus sidecar (step 21) writes each finished 2-hour
+# block there; Thanos Store reads them and the Compactor compacts, downsamples
+# and deletes them after 90 days (step 22). Chosen over a FlashBlade bucket
+# (2026-11-01) because the cluster's COSI driver can't reach the FlashBlade;
+# see metrics_exploration.md.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: maas-thanos-objstore
+  namespace: uat-project
+  labels:
+    app.kubernetes.io/part-of: maas-test
+data:
+  objstore.yml: |
+    type: FILESYSTEM
+    config:
+      directory: /thanos/blocks

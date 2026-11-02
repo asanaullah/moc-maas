@@ -1,0 +1,247 @@
+# Step 21: the MaaS's own Prometheus, with a Thanos sidecar.
+#
+# Prometheus keeps about six hours locally, in an emptyDir, cut into 2-hour
+# blocks; the sidecar copies each finished block to the metrics folder on
+# uat-project-storage (step 20). Everything older than a few hours is read
+# back through Thanos (step 22). A lost pod loses at most the newest couple of
+# hours (a known constraint).
+#
+# Targets are found through headless Services (DNS), one per component, so
+# Prometheus needs no Kubernetes API rights. Images are the ones the cluster's
+# own monitoring runs (OpenShift 4.22).
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: maas-prometheus-config
+  namespace: uat-project
+  labels:
+    app.kubernetes.io/part-of: maas-test
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 30s
+      evaluation_interval: 30s
+      # Thanos needs labels that identify this Prometheus among its stores.
+      external_labels:
+        cluster: oac-dev-workload0
+        namespace: uat-project
+        prometheus: maas-prometheus
+    scrape_configs:
+      - job_name: prometheus
+        static_configs:
+          - targets: ["127.0.0.1:9090"]
+      - job_name: limitador
+        dns_sd_configs:
+          - names: [maas-metrics-limitador.uat-project.svc.cluster.local]
+            type: A
+            port: 8080
+      - job_name: endpoint-picker
+        dns_sd_configs:
+          - names: [maas-metrics-epp.uat-project.svc.cluster.local]
+            type: A
+            port: 9090
+      - job_name: model
+        dns_sd_configs:
+          - names: [maas-metrics-sim.uat-project.svc.cluster.local]
+            type: A
+            port: 8000
+      - job_name: gateway
+        metrics_path: /stats/prometheus
+        dns_sd_configs:
+          - names: [maas-metrics-gateway.uat-project.svc.cluster.local]
+            type: A
+            port: 9901
+      - job_name: key-portal
+        dns_sd_configs:
+          - names: [maas-metrics-keys.uat-project.svc.cluster.local]
+            type: A
+            port: 8081
+      - job_name: admin-portal
+        dns_sd_configs:
+          - names: [maas-metrics-admin.uat-project.svc.cluster.local]
+            type: A
+            port: 9100
+      - job_name: keycloak
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt
+          server_name: maas-sso.uat-project.svc
+        dns_sd_configs:
+          - names: [maas-metrics-sso.uat-project.svc.cluster.local]
+            type: A
+            port: 9000
+      - job_name: thanos-query
+        static_configs:
+          - targets: ["maas-thanos-query.uat-project.svc.cluster.local:9090"]
+      - job_name: thanos
+        dns_sd_configs:
+          - names:
+              - maas-metrics-thanos.uat-project.svc.cluster.local
+              - maas-metrics-prometheus.uat-project.svc.cluster.local
+            type: A
+            port: 10902
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: maas-prometheus
+  namespace: uat-project
+  labels:
+    app.kubernetes.io/part-of: maas-test
+    app: maas-prometheus
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: maas-prometheus
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: maas-test
+        app: maas-prometheus
+        maas-metrics: thanos-sidecar
+    spec:
+      containers:
+        - name: prometheus
+          image: quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:e9f9d90f665aa34bede233ebfa89d03d5cd0a3c6224af5fd55de2235309a485a
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --storage.tsdb.retention.time=6h
+            # Fixed 2-hour blocks, so the sidecar can upload each one as it closes.
+            - --storage.tsdb.min-block-duration=2h
+            - --storage.tsdb.max-block-duration=2h
+            - --web.listen-address=0.0.0.0:9090
+          ports:
+            - {name: web, containerPort: 9090}
+          readinessProbe:
+            httpGet: {path: /-/ready, port: 9090}
+          livenessProbe:
+            httpGet: {path: /-/healthy, port: 9090}
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          volumeMounts:
+            - {name: data, mountPath: /prometheus}
+            - {name: config, mountPath: /etc/prometheus, readOnly: true}
+          resources:
+            requests: {cpu: 100m, memory: 512Mi}
+            limits: {cpu: "1", memory: 2Gi}
+        - name: thanos-sidecar
+          image: quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:a493512f8444a93cac0431f959309cf0d0559a513ec87ea297bab97ea2198126
+          args:
+            - sidecar
+            - --prometheus.url=http://127.0.0.1:9090
+            - --tsdb.path=/prometheus
+            - --objstore.config-file=/etc/thanos/objstore.yml
+            - --grpc-address=0.0.0.0:10901
+            - --http-address=0.0.0.0:10902
+            # Query reaches this over TLS; the certificate is maas-thanos-grpc's.
+            - --grpc-server-tls-cert=/etc/tls/grpc/tls.crt
+            - --grpc-server-tls-key=/etc/tls/grpc/tls.key
+            - --grpc-server-tls-min-version=1.2
+          ports:
+            - {name: grpc, containerPort: 10901}
+            - {name: http, containerPort: 10902}
+          readinessProbe:
+            httpGet: {path: /-/ready, port: 10902}
+          volumeMounts:
+            - {name: data, mountPath: /prometheus}
+            - {name: objstore, mountPath: /etc/thanos, readOnly: true}
+            - {name: blocks, mountPath: /thanos/blocks, subPath: maas/metrics}
+            - {name: grpc-tls, mountPath: /etc/tls/grpc, readOnly: true}
+          resources:
+            requests: {cpu: 20m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+      volumes:
+        - name: data
+          emptyDir: {sizeLimit: 5Gi}
+        - name: config
+          configMap: {name: maas-prometheus-config}
+        - name: objstore
+          configMap: {name: maas-thanos-objstore}
+        - name: blocks
+          persistentVolumeClaim: {claimName: uat-project-storage}
+        - name: grpc-tls
+          secret: {secretName: maas-thanos-grpc-tls}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: maas-prometheus
+  namespace: uat-project
+  labels:
+    app.kubernetes.io/part-of: maas-test
+spec:
+  selector:
+    app: maas-prometheus
+  ports:
+    - {name: web, port: 9090, targetPort: 9090}
+    - {name: grpc, port: 10901, targetPort: 10901}
+---
+# The gRPC servers (this sidecar and Thanos Store) present one service CA
+# certificate, issued for this Service's name, so Query can verify both with
+# one server name. The Service routes nowhere useful on its own.
+apiVersion: v1
+kind: Service
+metadata:
+  name: maas-thanos-grpc
+  namespace: uat-project
+  annotations:
+    service.beta.openshift.io/serving-cert-secret-name: maas-thanos-grpc-tls
+  labels:
+    app.kubernetes.io/part-of: maas-test
+spec:
+  clusterIP: None
+  selector:
+    maas-metrics: thanos-grpc-tls-only
+  ports:
+    - {name: grpc, port: 10901, targetPort: 10901}
+---
+# Headless Services: Prometheus finds every pod of each component through DNS.
+apiVersion: v1
+kind: Service
+metadata: {name: maas-metrics-limitador, namespace: uat-project, labels: {app.kubernetes.io/part-of: maas-test}}
+spec: {clusterIP: None, selector: {app: maas-limitador}, ports: [{name: metrics, port: 8080}]}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: maas-metrics-epp, namespace: uat-project, labels: {app.kubernetes.io/part-of: maas-test}}
+spec: {clusterIP: None, selector: {app: maas-epp}, ports: [{name: metrics, port: 9090}]}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: maas-metrics-sim, namespace: uat-project, labels: {app.kubernetes.io/part-of: maas-test}}
+spec: {clusterIP: None, selector: {app: maas-sim}, ports: [{name: metrics, port: 8000}]}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: maas-metrics-gateway, namespace: uat-project, labels: {app.kubernetes.io/part-of: maas-test}}
+spec: {clusterIP: None, selector: {app: maas-gateway}, ports: [{name: metrics, port: 9901}]}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: maas-metrics-keys, namespace: uat-project, labels: {app.kubernetes.io/part-of: maas-test}}
+spec: {clusterIP: None, selector: {app: maas-keys}, ports: [{name: metrics, port: 8081}]}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: maas-metrics-admin, namespace: uat-project, labels: {app.kubernetes.io/part-of: maas-test}}
+spec: {clusterIP: None, selector: {app: maas-admin}, ports: [{name: metrics, port: 9100}]}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: maas-metrics-sso, namespace: uat-project, labels: {app.kubernetes.io/part-of: maas-test}}
+spec: {clusterIP: None, selector: {app: maas-sso}, ports: [{name: metrics, port: 9000}]}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: maas-metrics-prometheus, namespace: uat-project, labels: {app.kubernetes.io/part-of: maas-test}}
+spec: {clusterIP: None, selector: {app: maas-prometheus}, ports: [{name: metrics, port: 10902}]}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: maas-metrics-thanos, namespace: uat-project, labels: {app.kubernetes.io/part-of: maas-test}}
+spec: {clusterIP: None, selector: {maas-metrics: thanos}, ports: [{name: metrics, port: 10902}]}
