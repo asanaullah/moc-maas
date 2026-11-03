@@ -1,0 +1,22 @@
+# Step 7: a client pod in uat-project that sends test traffic to the gateway.
+# maas-tui.py runs its load generator here with Python's standard library.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: maas-client
+  namespace: uat-project
+  labels:
+    app.kubernetes.io/part-of: maas-test
+    app: maas-client
+spec:
+  containers:
+    - name: client
+      image: registry.access.redhat.com/ubi9/python-312@sha256:2c7a89f9f1e69f2a00036041ef744b45c8830bebcb2f7194f403ca93729bb0cc
+      command: ["sleep", "infinity"]
+      resources:
+        requests:
+          cpu: 250m
+          memory: 128Mi
+        limits:
+          cpu: "1"
+          memory: 512Mi

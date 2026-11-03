@@ -1,0 +1,43 @@
+# Assisted by Claude Opus
+# Steps 23-25: the admin Grafana and its two dashboards. The dashboards'
+# ConfigMap is rendered from gen-dashboards.py at deploy time, so there is
+# no generated file to keep in git. The restart makes a Grafana that is
+# already running load new dashboards.
+- name: Render the dashboards (steps 23-24)
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_playbook_python }}"
+      - "{{ role_path }}/files/gen-dashboards.py"
+      - "{{ maas_namespace }}"
+  register: _maas_dashboards
+  changed_when: false
+
+- name: Apply the dashboard ConfigMap (step 24)
+  kubernetes.core.k8s:
+    state: present
+    apply: true
+    definition: "{{ item }}"
+  loop: "{{ _maas_dashboards.stdout | from_yaml_all | select | list }}"
+  loop_control:
+    label: "{{ item.kind }} {{ item.metadata.name }}"
+
+- name: Apply Grafana (step 25)
+  ansible.builtin.include_role:
+    name: maas_common
+    tasks_from: apply
+  vars:
+    manifests: [grafana.yaml]
+
+- name: Restart Grafana to load the dashboards
+  ansible.builtin.include_role:
+    name: maas_common
+    tasks_from: restart_deployments
+  vars:
+    deployments: [maas-grafana]
+
+- name: Wait for Grafana
+  ansible.builtin.include_role:
+    name: maas_common
+    tasks_from: wait_deployments
+  vars:
+    deployments: [maas-grafana]

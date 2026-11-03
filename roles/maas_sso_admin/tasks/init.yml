@@ -1,0 +1,15 @@
+# Assisted by Claude Opus
+# Points the master realm's login page at the local port-forward address,
+# so "oc port-forward deploy/maas-sso 9443:8443" gives a working admin
+# console at https://localhost:9443.
+- name: Set the master realm's frontend URL
+  kubernetes.core.k8s_exec:
+    namespace: "{{ maas_namespace }}"
+    pod: "{{ _maas_pod }}"
+    container: keycloak
+    command: bash /tmp/maas-kcadm.sh init
+  register: _maas_kcadm
+
+- name: Report
+  ansible.builtin.debug:
+    msg: "{{ _maas_kcadm.stdout_lines }}"

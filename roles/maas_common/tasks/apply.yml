@@ -1,0 +1,40 @@
+# Assisted by Claude Opus
+# Applies the given manifest files, each a name under maas_manifests_dir
+# (manifests/ at the repository root): client-side apply, no waiting.
+# Pods are the exception: they are only created when missing. The project's
+# Role grants no patch on pods, and a pod's spec is largely immutable anyway,
+# so an existing pod is left as it is.
+- name: Reset the object list
+  ansible.builtin.set_fact:
+    _maas_objects: []
+
+- name: Read each manifest
+  ansible.builtin.set_fact:
+    _maas_objects: "{{ _maas_objects + (lookup('ansible.builtin.file', maas_manifests_dir ~ '/' ~ item) | from_yaml_all | select | list) }}"
+  loop: "{{ manifests }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Check which of them are pods that already exist
+  kubernetes.core.k8s_info:
+    kind: Pod
+    namespace: "{{ maas_namespace }}"
+    name: "{{ item.metadata.name }}"
+  loop: "{{ _maas_objects | selectattr('kind', 'equalto', 'Pod') | list }}"
+  loop_control:
+    label: "{{ item.metadata.name }}"
+  register: _maas_have_pods
+
+- name: List the pods that already exist
+  ansible.builtin.set_fact:
+    _maas_existing_pod_names: "{{ _maas_have_pods.results | rejectattr('resources', 'equalto', []) | map(attribute='item.metadata.name') | list }}"
+
+- name: "Apply the objects from {{ manifests | join(', ') }}"
+  kubernetes.core.k8s:
+    state: present
+    apply: true
+    definition: "{{ item }}"
+  loop: "{{ _maas_objects }}"
+  loop_control:
+    label: "{{ item.kind }} {{ item.metadata.namespace | default('') }}/{{ item.metadata.name }}"
+  when: item.kind != 'Pod' or item.metadata.name not in _maas_existing_pod_names

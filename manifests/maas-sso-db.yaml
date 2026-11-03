@@ -1,0 +1,134 @@
+# Step 9: PostgreSQL for the MaaS Keycloak, separate from the portals' database
+# so identity data and keys don't share a store. Credentials come from the
+# maas-sso-db Secret (deploy.yml, step 1). Data lives on uat-project-storage
+# under maas/sso-postgres; backups under maas/sso-backups.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: maas-sso-db
+  namespace: uat-project
+  labels:
+    app.kubernetes.io/part-of: maas-test
+    app: maas-sso-db
+spec:
+  replicas: 1
+  # One writer on the data directory at a time.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: maas-sso-db
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: maas-test
+        app: maas-sso-db
+    spec:
+      containers:
+        - name: postgres
+          image: registry.redhat.io/rhel9/postgresql-16@sha256:9223bb5f0745e66f0e4204ff87d4d1a5283f3726e9b7d9b71d7bdb2a650fc218
+          # POSTGRESQL_USER, POSTGRESQL_PASSWORD and POSTGRESQL_DATABASE.
+          envFrom:
+            - secretRef:
+                name: maas-sso-db
+          ports:
+            - name: postgres
+              containerPort: 5432
+          readinessProbe:
+            tcpSocket:
+              port: 5432
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/pgsql/data
+              subPath: maas/sso-postgres
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: uat-project-storage
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: maas-sso-db
+  namespace: uat-project
+  labels:
+    app.kubernetes.io/part-of: maas-test
+spec:
+  selector:
+    app: maas-sso-db
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+# Daily logical backup to uat-project-storage under maas/backups, keeping the
+# last 14. Start one by hand with:
+#   oc create job -n uat-project maas-sso-db-backup-now --from=cronjob/maas-sso-db-backup
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: maas-sso-db-backup
+  namespace: uat-project
+  labels:
+    app.kubernetes.io/part-of: maas-test
+spec:
+  schedule: "30 3 * * *"
+  concurrencyPolicy: Forbid
+  # Finished backups leave no pods behind: success shows in the CronJob's
+  # lastSuccessfulTime and in the dump files. The last failure is kept, with
+  # its pod and logs, to diagnose.
+  successfulJobsHistoryLimit: 0
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/part-of: maas-test
+            app: maas-sso-db-backup
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: pg-dump
+              image: registry.redhat.io/rhel9/postgresql-16@sha256:9223bb5f0745e66f0e4204ff87d4d1a5283f3726e9b7d9b71d7bdb2a650fc218
+              command: ["bash", "-c"]
+              args:
+                - set -euo pipefail;
+                  f=/backup/maas-sso-$(date -u +%Y%m%dT%H%M%SZ).dump;
+                  pg_dump -h maas-sso-db -U "$POSTGRESQL_USER" -d "$POSTGRESQL_DATABASE" -Fc -f "$f.partial";
+                  mv "$f.partial" "$f";
+                  ls -1t /backup/maas-sso-*.dump | tail -n +15 | xargs -r rm -f;
+                  echo "wrote $f ($(stat -c %s "$f") bytes)"
+              env:
+                - name: POSTGRESQL_USER
+                  valueFrom:
+                    secretKeyRef: {name: maas-sso-db, key: POSTGRESQL_USER}
+                - name: POSTGRESQL_DATABASE
+                  valueFrom:
+                    secretKeyRef: {name: maas-sso-db, key: POSTGRESQL_DATABASE}
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef: {name: maas-sso-db, key: POSTGRESQL_PASSWORD}
+              volumeMounts:
+                - name: backup
+                  mountPath: /backup
+                  subPath: maas/sso-backups
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi
+          volumes:
+            - name: backup
+              persistentVolumeClaim:
+                claimName: uat-project-storage

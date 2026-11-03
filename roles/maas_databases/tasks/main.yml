@@ -1,0 +1,17 @@
+# Assisted by Claude Opus
+# Steps 8-9: PostgreSQL for the portals and for Keycloak.
+- name: Apply the databases (steps 8-9)
+  ansible.builtin.include_role:
+    name: maas_common
+    tasks_from: apply
+  vars:
+    manifests:
+      - maas-db.yaml
+      - maas-sso-db.yaml
+
+- name: Wait for the databases
+  ansible.builtin.include_role:
+    name: maas_common
+    tasks_from: wait_deployments
+  vars:
+    deployments: [maas-db, maas-sso-db]

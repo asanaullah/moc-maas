@@ -1,0 +1,24 @@
+# Assisted by Claude Opus
+# Step 15: the Envoy gateway that fronts the model pool, with the Kuadrant
+# wasm shim checking keys and Limitador counting tokens. The restart makes a
+# gateway that is already running pick up config changes.
+- name: Apply the gateway (step 15)
+  ansible.builtin.include_role:
+    name: maas_common
+    tasks_from: apply
+  vars:
+    manifests: [gateway.yaml]
+
+- name: Restart the gateway to pick up its config
+  ansible.builtin.include_role:
+    name: maas_common
+    tasks_from: restart_deployments
+  vars:
+    deployments: [maas-gateway]
+
+- name: Wait for the gateway
+  ansible.builtin.include_role:
+    name: maas_common
+    tasks_from: wait_deployments
+  vars:
+    deployments: [maas-gateway]

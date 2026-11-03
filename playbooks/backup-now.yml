@@ -1,0 +1,11 @@
+# Assisted by Claude Opus
+# Runs both database backups now, from their CronJobs, and waits for them.
+# Dumps land on the namespace's storage volume under maas/backups and
+# maas/sso-backups.
+#
+#   ansible-playbook -i clusters/oac-dev-workload0.yml playbooks/backup-now.yml
+- name: Database backups
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - maas_backup

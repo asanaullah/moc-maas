@@ -1,0 +1,19 @@
+# Assisted by Claude Opus
+# Restarts each deployment so pods pick up ConfigMap content they only read
+# at startup: a restartedAt annotation triggers a new roll. Follow with
+# wait_deployments; the annotation merges, the rest of the spec is untouched.
+- name: Restart the deployments
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: "{{ item }}"
+        namespace: "{{ maas_namespace }}"
+      spec:
+        template:
+          metadata:
+            annotations:
+              kubectl.kubernetes.io/restartedAt: "{{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}"
+  loop: "{{ deployments }}"

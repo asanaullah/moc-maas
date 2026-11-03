@@ -1,0 +1,8 @@
+# Assisted by Claude Opus
+galaxy_info:
+  author: moc-maas
+  description: The Envoy gateway with the Kuadrant wasm shim and Limitador
+  license: MIT
+  min_ansible_version: "2.16"
+dependencies:
+  - role: maas_common

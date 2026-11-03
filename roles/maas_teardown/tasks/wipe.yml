@@ -1,0 +1,60 @@
+# Assisted by Claude Opus
+# Wipes the databases' files from the storage volume, so the next deploy is a
+# true fresh install: empty databases, Keycloak imports its realm again and
+# accepts the bootstrap-admin password from the current Secret. Backups and
+# metrics stay. Runs after the workloads are gone, from a short-lived pod that
+# mounts the volume; nothing else is mounted then, so no database is wiped
+# underneath a running pod.
+- name: Run the wipe pod
+  kubernetes.core.k8s:
+    state: present
+    apply: true
+    namespace: "{{ maas_namespace }}"
+    definition:
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: maas-wipe
+        labels:
+          app.kubernetes.io/part-of: "{{ maas_part_of }}"
+      spec:
+        restartPolicy: Never
+        activeDeadlineSeconds: 300
+        containers:
+          - name: wipe
+            image: "{{ maas_wipe_image }}"
+            command:
+              - bash
+              - -c
+              - 'for d in /mnt/maas/postgres /mnt/maas/sso-postgres; do [ -d "$d" ] && find "$d" -mindepth 1 -delete; done; echo wiped'
+            volumeMounts:
+              - name: data
+                mountPath: /mnt
+        volumes:
+          - name: data
+            persistentVolumeClaim:
+              claimName: "{{ maas_storage_claim }}"
+
+- name: Wait for the wipe to finish
+  kubernetes.core.k8s_info:
+    kind: Pod
+    namespace: "{{ maas_namespace }}"
+    name: maas-wipe
+  register: _maas_wipe
+  until: _maas_wipe.resources[0].status.phase | default('') in ['Succeeded', 'Failed']
+  retries: "{{ (maas_ready_timeout | int / maas_poll_delay | int) | int }}"
+  delay: "{{ maas_poll_delay }}"
+
+- name: Check the wipe succeeded
+  ansible.builtin.assert:
+    that: _maas_wipe.resources[0].status.phase == 'Succeeded'
+    fail_msg: the wipe pod failed; the volume was left in whatever state it reached
+    quiet: true
+
+- name: Remove the wipe pod
+  kubernetes.core.k8s:
+    state: absent
+    namespace: "{{ maas_namespace }}"
+    kind: Pod
+    api_version: v1
+    name: maas-wipe

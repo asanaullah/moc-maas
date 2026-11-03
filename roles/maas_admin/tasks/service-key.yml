@@ -1,0 +1,60 @@
+# Assisted by Claude Opus
+# Mints a service key for an application. Without maas_secret_name the key
+# is printed once, in the API's response — copy it then; with it, the key is
+# stored in that Secret (keys: key, id) and only the id is printed.
+- name: Check the arguments
+  ansible.builtin.assert:
+    that:
+      - maas_owner is defined
+      - maas_owner is match('^[A-Za-z0-9._@-]+$')
+      - maas_key_name is defined
+      - maas_key_name is match('^[A-Za-z0-9._-]+$')
+      - maas_plan is defined
+      - maas_plan is match('^[A-Za-z0-9._-]+$')
+      - maas_days is defined
+      - maas_days | int > 0
+      - maas_secret_name is not defined or maas_secret_name is match('^[A-Za-z0-9._-]+$')
+    fail_msg: set maas_owner, maas_key_name, maas_plan and maas_days; optional maas_secret_name to store the key in
+    quiet: true
+
+- name: Mint the service key
+  kubernetes.core.k8s_exec:
+    namespace: "{{ maas_namespace }}"
+    pod: "{{ _maas_pod }}"
+    command: "python3 /tmp/maas-api.py POST /api/service-keys '{{ {'owner': maas_owner, 'name': maas_key_name, 'plan': maas_plan, 'days': maas_days | int} | to_json }}'"
+  register: _maas_api
+  no_log: true
+
+- name: Store the service key in a Secret
+  kubernetes.core.k8s:
+    state: present
+    namespace: "{{ maas_namespace }}"
+    server_side_apply:
+      field_manager: maas-admin
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "{{ maas_secret_name }}"
+        labels:
+          app.kubernetes.io/part-of: "{{ maas_part_of }}"
+      stringData:
+        key: "{{ (_maas_api.stdout | from_json).key }}"
+        id: "{{ (_maas_api.stdout | from_json).id }}"
+  no_log: true
+  when: maas_secret_name is defined
+
+- name: Report the stored key's id
+  ansible.builtin.debug:
+    msg: "service key {{ (_maas_api.stdout | from_json).id }} stored in Secret {{ maas_secret_name }} (keys: key, id)"
+  when: maas_secret_name is defined
+
+- name: Print the key once
+  ansible.builtin.debug:
+    msg: "{{ _maas_api.stdout }}"
+  when: maas_secret_name is not defined
+
+# So the key doesn't sit in a fact for the rest of the play.
+- name: Forget the response
+  ansible.builtin.set_fact:
+    _maas_api: {}

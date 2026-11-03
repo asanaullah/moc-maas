@@ -1,0 +1,20 @@
+# Assisted by Claude Opus
+# Keycloak admin for the MaaS's realm, run inside a Keycloak pod with that
+# pod's own bootstrap-admin credentials, so no admin password passes through
+# this machine.
+#
+#   ansible-playbook -i clusters/oac-dev-workload0.yml playbooks/sso-admin.yml -e maas_action=<action>
+#
+#   maas_action=groups
+#   maas_action=group-create -e maas_group=<group>
+#   maas_action=users
+#   maas_action=user-groups  -e maas_email=<email>
+#   maas_action=add          -e maas_email=<email> -e maas_group=<group>
+#   maas_action=remove       -e maas_email=<email> -e maas_group=<group>
+#
+# (init and usage-client exist too; deploy.yml runs them at the right times.)
+- name: Keycloak admin
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - maas_sso_admin

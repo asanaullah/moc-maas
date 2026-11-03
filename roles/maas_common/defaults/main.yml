@@ -1,0 +1,23 @@
+# Assisted by Claude Opus
+# Namespaces and the apps domain come from the cluster inventory (clusters/);
+# these defaults only carry derivations and tuning.
+maas_part_of: maas-test
+# The playbooks live in playbooks/ one level below the repository root, where
+# manifests/ sits next to them.
+maas_manifests_dir: "{{ playbook_dir | dirname }}/manifests"
+maas_rollout_timeout: 600
+maas_ready_timeout: 300
+maas_backup_timeout: 600
+maas_poll_delay: 5
+
+maas_keys_host: "maas-keys-{{ maas_namespace }}.{{ maas_apps_domain }}"
+maas_sso_host: "maas-sso-{{ maas_namespace }}.{{ maas_apps_domain }}"
+maas_gateway_host: "maas-gateway-{{ maas_namespace }}.{{ maas_apps_domain }}"
+maas_usage_host: "maas-usage-{{ maas_namespace }}.{{ maas_apps_domain }}"
+maas_gateway_url: "https://{{ maas_gateway_host }}/v1/chat/completions"
+
+# The shared volume the databases (and backups and metrics) live on, and the
+# image the teardown's wipe step runs from — pinned to the portals' image so
+# nothing new gets pulled for it.
+maas_storage_claim: uat-project-storage
+maas_wipe_image: registry.access.redhat.com/ubi9/python-312@sha256:2c7a89f9f1e69f2a00036041ef744b45c8830bebcb2f7194f403ca93729bb0cc

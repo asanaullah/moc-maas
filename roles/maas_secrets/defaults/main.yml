@@ -1,0 +1,27 @@
+# Assisted by Claude Opus
+# What goes into each generated Secret. The values are only evaluated for the
+# secrets that are missing, so the Jinja references to _maas_new never fail.
+maas_generated_secrets:
+  - maas-db
+  - maas-sso-db
+  - maas-sso-admin
+  - maas-portal-oidc
+  - maas-usage-oidc
+
+maas_secret_string_data:
+  maas-db:
+    POSTGRESQL_USER: maas
+    POSTGRESQL_DATABASE: maas
+    POSTGRESQL_PASSWORD: "{{ _maas_new['maas-db'] }}"
+    DATABASE_URL: "postgresql://maas:{{ _maas_new['maas-db'] }}@maas-db:5432/maas"
+  maas-sso-db:
+    POSTGRESQL_USER: keycloak
+    POSTGRESQL_DATABASE: keycloak
+    POSTGRESQL_PASSWORD: "{{ _maas_new['maas-sso-db'] }}"
+  maas-sso-admin:
+    KC_BOOTSTRAP_ADMIN_USERNAME: maas-admin
+    KC_BOOTSTRAP_ADMIN_PASSWORD: "{{ _maas_new['maas-sso-admin'] }}"
+  maas-portal-oidc:
+    client-secret: "{{ _maas_new['maas-portal-oidc'] }}"
+  maas-usage-oidc:
+    client-secret: "{{ _maas_new['maas-usage-oidc'] }}"

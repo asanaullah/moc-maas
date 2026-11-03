@@ -1,0 +1,94 @@
+# Assisted by Claude Opus
+# Installs the whole MaaS in the namespace, in dependency order. Safe to
+# re-run: it applies the same manifests, only creates Secrets that are
+# missing, and restarts deployments to pick up changed code and config.
+#
+#   MOC_MAAS_CLIENTID=... MOC_MAAS_SECRET=... \
+#     ansible-playbook -i clusters/oac-dev-workload0.yml playbooks/deploy.yml
+#
+# The GitHub credentials are the OAuth App that Keycloak brokers logins
+# through (step 2); they are only needed while maas-sso-github doesn't exist
+# yet — a re-deploy leaves an existing one alone. The public addresses
+# (steps 16-18 and 28) are installed too when asked for:
+#
+#   ansible-playbook -i clusters/oac-dev-workload0.yml playbooks/deploy.yml -e maas_routes=true
+- name: Secrets (steps 1-2)
+  hosts: localhost
+  gather_facts: false
+  pre_tasks:
+    - name: Check the cluster inventory was given
+      ansible.builtin.assert:
+        that:
+          - maas_namespace is defined
+          - maas_apps_domain is defined
+        fail_msg: run with -i clusters/<cluster>.yml
+        quiet: true
+  roles:
+    - maas_secrets
+
+- name: Model path (steps 3-7)
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - maas_model
+
+- name: Databases (steps 8-9)
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - maas_databases
+
+- name: Keycloak (steps 10-11)
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - maas_sso
+
+- name: Portals (steps 12-14)
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - maas_portals
+
+- name: Gateway (step 15)
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - maas_gateway
+
+- name: Metrics (steps 20-22)
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - maas_metrics
+
+- name: Grafana (steps 23-25)
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - maas_grafana
+
+- name: User dashboard (steps 26-27)
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - maas_usage
+
+- name: Public addresses (steps 16-18 and 28)
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - role: maas_routes
+      when: maas_routes | default(false) | bool
+
+- name: Done
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: What to do next
+      ansible.builtin.debug:
+        msg:
+          - "The MaaS is up in {{ maas_namespace }}."
+          - "Next: ansible-playbook -i clusters/<cluster>.yml playbooks/first-plan.yml   (a Keycloak group and a plan for it), then add users:"
+          - "  ansible-playbook -i clusters/<cluster>.yml playbooks/sso-admin.yml -e maas_action=add -e maas_email=<email> -e maas_group=maas-standard   (after they sign in once)"
+          - "Consoles: ./forward.sh puts the admin portal, Keycloak and Grafana on localhost."

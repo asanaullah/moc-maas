@@ -1,0 +1,21 @@
+# Assisted by Claude Opus
+# Removes the MaaS from the namespace — workloads, Services, Routes,
+# ConfigMaps, CronJobs, the InferencePool, the client pod and the MaaS's
+# Secrets. Database files, backups and metrics on the namespace's storage
+# volume (maas/) are kept.
+#
+# To also wipe the databases from the volume, so the next deploy is a true
+# fresh install (empty databases; Keycloak imports its realm again and
+# accepts the bootstrap-admin password from the current Secret):
+#
+#   ansible-playbook -i clusters/oac-dev-workload0.yml playbooks/teardown.yml -e maas_wipe_data=true
+#
+# There is no --yes flag to forget: running this playbook is the
+# confirmation, so be sure before you do.
+#
+#   ansible-playbook -i clusters/oac-dev-workload0.yml playbooks/teardown.yml
+- name: Teardown
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - maas_teardown

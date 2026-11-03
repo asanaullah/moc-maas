@@ -1,0 +1,12 @@
+# Assisted by Claude Opus
+- name: List users
+  kubernetes.core.k8s_exec:
+    namespace: "{{ maas_namespace }}"
+    pod: "{{ _maas_pod }}"
+    container: keycloak
+    command: bash /tmp/maas-kcadm.sh users
+  register: _maas_kcadm
+
+- name: Report
+  ansible.builtin.debug:
+    msg: "{{ _maas_kcadm.stdout_lines | select | list if _maas_kcadm.stdout_lines | select | list else ['(no users yet)'] }}"

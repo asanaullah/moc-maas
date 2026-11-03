@@ -1,0 +1,19 @@
+# Assisted by Claude Opus
+# Steps 20-22: the Thanos object store, Prometheus scraping the MaaS, and
+# the Thanos query and compact components that make the metrics last.
+- name: Apply the metrics stack (steps 20-22)
+  ansible.builtin.include_role:
+    name: maas_common
+    tasks_from: apply
+  vars:
+    manifests:
+      - metrics-store.yaml
+      - prometheus.yaml
+      - thanos.yaml
+
+- name: Wait for the metrics stack
+  ansible.builtin.include_role:
+    name: maas_common
+    tasks_from: wait_deployments
+  vars:
+    deployments: [maas-prometheus, maas-thanos-store, maas-thanos-query, maas-thanos-compact]

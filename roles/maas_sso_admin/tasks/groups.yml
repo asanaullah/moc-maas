@@ -1,0 +1,17 @@
+# Assisted by Claude Opus
+- name: List groups
+  kubernetes.core.k8s_exec:
+    namespace: "{{ maas_namespace }}"
+    pod: "{{ _maas_pod }}"
+    container: keycloak
+    command: bash /tmp/maas-kcadm.sh groups
+  register: _maas_kcadm
+
+- name: Report
+  ansible.builtin.debug:
+    msg: "{{ 'groups: ' ~ (_maas_kcadm.stdout_lines | select | list | join(', ') if _maas_kcadm.stdout_lines | select | list else 'groups: (none)') }}"
+
+# first-plan.yml reads this to skip creating a group that exists.
+- name: Remember the group list
+  ansible.builtin.set_fact:
+    _maas_groups: "{{ _maas_kcadm.stdout_lines | select | list }}"

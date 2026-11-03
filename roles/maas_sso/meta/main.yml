@@ -1,0 +1,8 @@
+# Assisted by Claude Opus
+galaxy_info:
+  author: moc-maas
+  description: Keycloak with the GitHub identity provider, and its first-run setup
+  license: MIT
+  min_ansible_version: "2.16"
+dependencies:
+  - role: maas_common

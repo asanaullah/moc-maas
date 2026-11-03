@@ -1,0 +1,8 @@
+# Assisted by Claude Opus
+galaxy_info:
+  author: moc-maas
+  description: The admin and key portals, with their code rendered into a ConfigMap
+  license: MIT
+  min_ansible_version: "2.16"
+dependencies:
+  - role: maas_common

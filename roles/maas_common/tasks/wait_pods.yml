@@ -1,0 +1,16 @@
+# Assisted by Claude Opus
+# Waits until each pod reports Ready, or maas_ready_timeout passes.
+- name: Wait for the pods to be Ready
+  kubernetes.core.k8s_info:
+    kind: Pod
+    namespace: "{{ maas_namespace }}"
+    name: "{{ item }}"
+  register: _maas_pod
+  until: >-
+    _maas_pod.resources | length > 0
+    and (_maas_pod.resources | first).status.conditions | default([])
+        | selectattr('type', 'equalto', 'Ready') | selectattr('status', 'equalto', 'True')
+        | list | length > 0
+  retries: "{{ (maas_ready_timeout | int / maas_poll_delay | int) | int }}"
+  delay: "{{ maas_poll_delay }}"
+  loop: "{{ pods }}"

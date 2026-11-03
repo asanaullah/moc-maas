@@ -1,0 +1,52 @@
+# Assisted by Claude Opus
+# Sends one chat completion through the MaaS gateway's public Route with
+# the key in MOC_MAAS_KEY, and prints the response and the HTTP status.
+#
+#   MOC_MAAS_KEY=... ansible-playbook -i clusters/oac-dev-workload0.yml playbooks/test-gateway.yml \
+#     [-e maas_model=maas-sim] [-e maas_prompt=hi]
+#
+# 200 = served, 401 = bad, expired or revoked key, 403 = model not in your
+# plan, 429 = token budget used up for this window.
+- name: Test the gateway
+  hosts: localhost
+  gather_facts: false
+  # maas_common contributes only shared defaults (the gateway's URL among
+  # them); it has no tasks of its own.
+  roles:
+    - maas_common
+  vars:
+    maas_model: maas-sim
+    maas_prompt: hi
+  tasks:
+    - name: Check the key
+      ansible.builtin.assert:
+        that: lookup('ansible.builtin.env', 'MOC_MAAS_KEY') | length > 0
+        fail_msg: set MOC_MAAS_KEY to your MaaS API key
+        quiet: true
+
+    # The key stays in the environment and in this task's hidden request
+    # headers; the debug below prints only the response and the status. The
+    # Route's certificate is the router's own, not publicly trusted. Any HTTP
+    # answer is a result to report; only no answer at all fails the play.
+    - name: Send one chat completion
+      ansible.builtin.uri:
+        url: "{{ maas_gateway_url }}"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ lookup('ansible.builtin.env', 'MOC_MAAS_KEY') }}"
+        body:
+          model: "{{ maas_model }}"
+          max_tokens: 16
+          messages:
+            - role: user
+              content: "{{ maas_prompt }}"
+        body_format: json
+        status_code: [200, 401, 403, 429]
+        validate_certs: false
+      register: _maas_response
+      no_log: true
+      failed_when: _maas_response.status is not defined
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: "{{ _maas_response.body | default(_maas_response.json) | default('') }}\nHTTP {{ _maas_response.status }}"

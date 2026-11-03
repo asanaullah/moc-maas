@@ -1,0 +1,82 @@
+# Assisted by Claude Opus
+- name: Ensure the generated secrets (step 1)
+  when: maas_secrets_generated | default(true) | bool
+  block:
+    # Each only if it doesn't exist yet, so re-running is safe. To rotate one,
+    # delete it, re-run deploy, and restart what uses it; the PostgreSQL image
+    # resets its user's password from the Secret on each start. Values are
+    # random (192 bits) and never printed.
+    - name: Check which generated secrets exist
+      kubernetes.core.k8s_info:
+        kind: Secret
+        namespace: "{{ maas_namespace }}"
+        name: "{{ item }}"
+      loop: "{{ maas_generated_secrets }}"
+      register: _maas_have
+      no_log: true
+
+    - name: Report the ones that stay as they are
+      ansible.builtin.debug:
+        msg: "{{ item.item }} exists, left as it is"
+      loop: "{{ _maas_have.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: item.resources | length > 0
+
+    - name: Generate a value for each missing secret
+      ansible.builtin.set_fact:
+        _maas_new: "{{ _maas_new | default({}) | combine({item.item: lookup('ansible.builtin.password', '/dev/null', length=48, chars='abcdef0123456789')}) }}"
+      loop: "{{ _maas_have.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: item.resources | length == 0
+      no_log: true
+
+    - name: Create the missing secrets
+      kubernetes.core.k8s:
+        state: present
+        server_side_apply:
+          field_manager: maas-admin
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: "{{ item }}"
+            namespace: "{{ maas_namespace }}"
+            labels:
+              app.kubernetes.io/part-of: "{{ maas_part_of }}"
+          stringData: "{{ maas_secret_string_data[item] }}"
+      loop: "{{ _maas_new | default({}) | list }}"
+      no_log: true
+
+    - name: Report the created ones
+      ansible.builtin.debug:
+        msg: "created {{ item }}"
+      loop: "{{ _maas_new | default({}) | list }}"
+
+    # So the generated values don't sit in facts for the rest of the play.
+    - name: Forget the generated values
+      ansible.builtin.set_fact:
+        _maas_new: {}
+
+# Step 2: the GitHub OAuth App's secret is only created when missing, so a
+# re-deploy can't overwrite it with stale environment values.
+# github-secret.yml rotates it by setting maas_secrets_github_apply.
+- name: Check the GitHub secret
+  kubernetes.core.k8s_info:
+    kind: Secret
+    namespace: "{{ maas_namespace }}"
+    name: maas-sso-github
+  register: _maas_have_github
+  no_log: true
+
+- name: Report the GitHub secret
+  ansible.builtin.debug:
+    msg: maas-sso-github exists, left as it is
+  when:
+    - _maas_have_github.resources | length > 0
+    - not (maas_secrets_github_apply | default(false) | bool)
+
+- name: Create or update the GitHub secret
+  ansible.builtin.include_tasks: github.yml
+  when: _maas_have_github.resources | length == 0 or (maas_secrets_github_apply | default(false) | bool)

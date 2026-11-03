@@ -1,0 +1,29 @@
+# Assisted by Claude Opus
+# Step 26: the dashboard's OIDC client in Keycloak (realm maas), redirecting
+# to the dashboard's Route host (step 28). Step 27: the dashboard itself.
+- name: Register the dashboard with Keycloak (step 26)
+  ansible.builtin.include_role:
+    name: maas_sso_admin
+  vars:
+    maas_action: usage-client
+
+- name: Apply the user dashboard (step 27)
+  ansible.builtin.include_role:
+    name: maas_common
+    tasks_from: apply
+  vars:
+    manifests: [maas-usage.yaml]
+
+- name: Restart the dashboard to pick up its config
+  ansible.builtin.include_role:
+    name: maas_common
+    tasks_from: restart_deployments
+  vars:
+    deployments: [maas-usage]
+
+- name: Wait for the dashboard
+  ansible.builtin.include_role:
+    name: maas_common
+    tasks_from: wait_deployments
+  vars:
+    deployments: [maas-usage]

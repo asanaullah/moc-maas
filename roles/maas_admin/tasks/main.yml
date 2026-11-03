@@ -1,0 +1,36 @@
+# Assisted by Claude Opus
+# Runs one admin command through the admin portal's JSON API, from inside
+# the portal's own pod (it has no Service; it listens on the pod's localhost
+# only). The command is maas_action; each action file checks its own
+# arguments.
+- name: Check the action
+  ansible.builtin.assert:
+    that:
+      - maas_action is defined
+      - maas_action in ['plans', 'plan-set', 'plan-delete', 'groups', 'group-map', 'group-unmap', 'limits', 'keys', 'service-key', 'revoke', 'audit']
+    fail_msg: set maas_action to one of plans, plan-set, plan-delete, groups, group-map, group-unmap, limits, keys, service-key, revoke, audit
+    quiet: true
+
+- name: Find a running admin portal pod
+  ansible.builtin.include_role:
+    name: maas_common
+    tasks_from: find_pod
+  vars:
+    pod_label: app=maas-admin
+    pod_what: deploy/maas-admin
+
+# Base64 through bash: keeps the delivery independent of tar, which some
+# images (Keycloak's, for one) ship without.
+- name: Remember the API helper, base64-encoded
+  ansible.builtin.set_fact:
+    _maas_api_b64: "{{ lookup('ansible.builtin.file', role_path ~ '/files/api.py') | b64encode }}"
+  no_log: true
+
+- name: Put the API helper into the pod
+  kubernetes.core.k8s_exec:
+    namespace: "{{ maas_namespace }}"
+    pod: "{{ _maas_pod }}"
+    command: "bash -c 'echo {{ _maas_api_b64 }} | base64 -d > /tmp/maas-api.py'"
+
+- name: "Run {{ maas_action }}"
+  ansible.builtin.include_tasks: "{{ maas_action }}.yml"

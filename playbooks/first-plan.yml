@@ -1,0 +1,55 @@
+# Assisted by Claude Opus
+# A first plan and the Keycloak group that grants it.
+# Users added to the group (playbooks/sso-admin.yml -e maas_action=add) can
+# then create keys under the plan. Re-running updates the plan and keeps the
+# group.
+#
+#   ansible-playbook -i clusters/oac-dev-workload0.yml playbooks/first-plan.yml
+#
+# Everything can be overridden with -e:
+#   -e maas_group=maas-standard -e maas_plan=standard -e maas_tokens=20000
+#   -e maas_window=60 -e maas_days=90 -e maas_models=maas-sim
+- name: First plan
+  hosts: localhost
+  gather_facts: false
+  vars:
+    maas_group: maas-standard
+    maas_plan: standard
+    maas_tokens: 20000
+    maas_window: 60
+    maas_days: 90
+    maas_models: maas-sim
+  tasks:
+    - name: List the Keycloak groups
+      ansible.builtin.include_role:
+        name: maas_sso_admin
+      vars:
+        maas_action: groups
+
+    - name: Report the existing group
+      ansible.builtin.debug:
+        msg: "Keycloak group {{ maas_group }} exists"
+      when: maas_group in _maas_groups
+
+    - name: Create the group when it is missing
+      ansible.builtin.include_role:
+        name: maas_sso_admin
+      vars:
+        maas_action: group-create
+      when: maas_group not in _maas_groups
+
+    - name: Set the plan
+      ansible.builtin.include_role:
+        name: maas_admin
+      vars:
+        maas_action: plan-set
+
+    - name: Map the group to the plan
+      ansible.builtin.include_role:
+        name: maas_admin
+      vars:
+        maas_action: group-map
+
+    - name: Summarize
+      ansible.builtin.debug:
+        msg: "Members of {{ maas_group }} get plan {{ maas_plan }}: {{ maas_tokens }} tokens per {{ maas_window }}s, models {{ maas_models }}, keys up to {{ maas_days }} days."

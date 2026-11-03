@@ -1,0 +1,7 @@
+# Assisted by Claude Opus
+galaxy_info:
+  author: moc-maas
+  description: Shared settings and tasks for the MaaS playbooks (timeouts, hosts, apply and wait helpers)
+  license: MIT
+  min_ansible_version: "2.16"
+dependencies: []

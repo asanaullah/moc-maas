@@ -1,0 +1,13 @@
+# Assisted by Claude Opus
+# Runs both database backups now, from their CronJobs, and waits for them.
+# Dumps land on the namespace's storage volume under maas/backups and
+# maas/sso-backups.
+- name: Stamp the job names
+  ansible.builtin.set_fact:
+    _maas_backup_stamp: "{{ now(utc=true, fmt='%Y%m%d%H%M%S') }}"
+
+- name: Run each backup
+  ansible.builtin.include_tasks: run.yml
+  loop: [maas-db-backup, maas-sso-db-backup]
+  loop_control:
+    loop_var: _maas_cronjob

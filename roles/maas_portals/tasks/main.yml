@@ -1,0 +1,39 @@
+# Assisted by Claude Opus
+# Steps 12-14: the portals' code (one ConfigMap rendered from portal.py) and
+# the deployments that run it. The restart makes a portal that is already
+# running pick up changed code; on a first install it is one extra roll.
+- name: Apply the portal code ConfigMap (steps 12-13)
+  kubernetes.core.k8s:
+    state: present
+    apply: true
+    namespace: "{{ maas_namespace }}"
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: maas-portal-code
+        labels:
+          app.kubernetes.io/part-of: "{{ maas_part_of }}"
+      data:
+        portal.py: "{{ lookup('ansible.builtin.file', role_path ~ '/files/portal.py') }}"
+
+- name: Apply the portals (step 14)
+  ansible.builtin.include_role:
+    name: maas_common
+    tasks_from: apply
+  vars:
+    manifests: [maas-portals.yaml]
+
+- name: Restart the portals to pick up the code
+  ansible.builtin.include_role:
+    name: maas_common
+    tasks_from: restart_deployments
+  vars:
+    deployments: [maas-admin, maas-keys]
+
+- name: Wait for the portals
+  ansible.builtin.include_role:
+    name: maas_common
+    tasks_from: wait_deployments
+  vars:
+    deployments: [maas-admin, maas-keys]

@@ -1,0 +1,20 @@
+# Assisted by Claude Opus
+- name: Check the email
+  ansible.builtin.assert:
+    that:
+      - maas_email is defined
+      - maas_email is match('^[A-Za-z0-9._@-]+$')
+    fail_msg: set maas_email to the user's email (letters, digits, dot, underscore, at or dash)
+    quiet: true
+
+- name: List the user's groups
+  kubernetes.core.k8s_exec:
+    namespace: "{{ maas_namespace }}"
+    pod: "{{ _maas_pod }}"
+    container: keycloak
+    command: "bash /tmp/maas-kcadm.sh user-groups {{ maas_email }}"
+  register: _maas_kcadm
+
+- name: Report
+  ansible.builtin.debug:
+    msg: "{{ maas_email ~ ': ' ~ (_maas_kcadm.stdout_lines | select | list | join(', ') if _maas_kcadm.stdout_lines | select | list else '(none)') }}"

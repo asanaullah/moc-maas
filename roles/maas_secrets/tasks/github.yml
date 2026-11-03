@@ -1,0 +1,46 @@
+# Assisted by Claude Opus
+# Creates or updates the maas-sso-github Secret from MOC_MAAS_CLIENTID and
+# MOC_MAAS_SECRET in the environment, so the values reach the cluster without
+# passing through a command line. Server-side apply keeps them out of a
+# last-applied-configuration annotation, and no_log keeps them out of the
+# Ansible output. Re-run to rotate.
+- name: Read the GitHub OAuth App credentials from the environment
+  ansible.builtin.set_fact:
+    _maas_github_clientid: "{{ lookup('ansible.builtin.env', 'MOC_MAAS_CLIENTID') }}"
+    _maas_github_secret: "{{ lookup('ansible.builtin.env', 'MOC_MAAS_SECRET') }}"
+  no_log: true
+
+- name: Check the credentials are set
+  ansible.builtin.assert:
+    that:
+      - _maas_github_clientid | length > 0
+      - _maas_github_secret | length > 0
+    fail_msg: set MOC_MAAS_CLIENTID and MOC_MAAS_SECRET in your environment (the GitHub OAuth app's client ID and secret)
+    quiet: true
+
+- name: Create or update maas-sso-github
+  kubernetes.core.k8s:
+    state: present
+    server_side_apply:
+      field_manager: maas-admin
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: maas-sso-github
+        namespace: "{{ maas_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: "{{ maas_part_of }}"
+      stringData:
+        client-id: "{{ _maas_github_clientid }}"
+        client-secret: "{{ _maas_github_secret }}"
+  no_log: true
+
+- name: Report the GitHub secret
+  ansible.builtin.debug:
+    msg: "maas-sso-github is in {{ maas_namespace }} with keys: client-id, client-secret"
+
+- name: Forget the credentials
+  ansible.builtin.set_fact:
+    _maas_github_clientid: ""
+    _maas_github_secret: ""

@@ -1,0 +1,8 @@
+# Assisted by Claude Opus
+galaxy_info:
+  author: moc-maas
+  description: The admin Grafana, with dashboards rendered from gen-dashboards.py
+  license: MIT
+  min_ansible_version: "2.16"
+dependencies:
+  - role: maas_common

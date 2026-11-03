@@ -1,0 +1,23 @@
+# Assisted by Claude Opus
+# Registers the user dashboard as an OIDC client with PKCE, so its pods can
+# log users in. Reads the client secret from the Keycloak pod's own
+# environment.
+- name: Check the dashboard host
+  ansible.builtin.assert:
+    that:
+      - maas_usage_host is defined
+      - maas_usage_host is match('^[A-Za-z0-9.-]+$')
+    fail_msg: set maas_usage_host to the dashboard's route host
+    quiet: true
+
+- name: Register or update the usage client
+  kubernetes.core.k8s_exec:
+    namespace: "{{ maas_namespace }}"
+    pod: "{{ _maas_pod }}"
+    container: keycloak
+    command: "bash /tmp/maas-kcadm.sh usage-client {{ maas_usage_host }}"
+  register: _maas_kcadm
+
+- name: Report
+  ansible.builtin.debug:
+    msg: "{{ _maas_kcadm.stdout_lines }}"

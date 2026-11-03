@@ -1,0 +1,85 @@
+# Assisted by Claude Opus
+# Removes the MaaS from its namespace — workloads, Services, Routes,
+# ConfigMaps, CronJobs, the InferencePool, the client pod and the MaaS's
+# Secrets. The service CA's maas-*-tls Secrets go with their Services.
+# Database files, backups and metrics on the namespace's storage volume
+# (maas/) are kept; delete those separately.
+- name: Remove the labeled resources
+  kubernetes.core.k8s:
+    state: absent
+    namespace: "{{ maas_namespace }}"
+    kind: "{{ item.kind }}"
+    api_version: "{{ item.api }}"
+    label_selectors: ["app.kubernetes.io/part-of={{ maas_part_of }}"]
+  loop:
+    - {kind: Route, api: route.openshift.io/v1}
+    - {kind: Deployment, api: apps/v1}
+    - {kind: Service, api: v1}
+    - {kind: ConfigMap, api: v1}
+    - {kind: CronJob, api: batch/v1}
+    - {kind: InferencePool, api: inference.networking.k8s.io/v1}
+  loop_control:
+    label: "{{ item.kind }}"
+
+# Wait for the deletions to finish, so a deploy right after a teardown
+# can't race a terminating object.
+- name: Wait for the labeled resources to be gone
+  kubernetes.core.k8s_info:
+    kind: "{{ item.kind }}"
+    api_version: "{{ item.api }}"
+    namespace: "{{ maas_namespace }}"
+    label_selectors: ["app.kubernetes.io/part-of={{ maas_part_of }}"]
+  register: _maas_left
+  until: _maas_left.resources | length == 0
+  retries: "{{ (maas_rollout_timeout | int / maas_poll_delay | int) | int }}"
+  delay: "{{ maas_poll_delay }}"
+  loop:
+    - {kind: Route, api: route.openshift.io/v1}
+    - {kind: Deployment, api: apps/v1}
+    - {kind: Service, api: v1}
+    - {kind: ConfigMap, api: v1}
+    - {kind: CronJob, api: batch/v1}
+    - {kind: InferencePool, api: inference.networking.k8s.io/v1}
+  loop_control:
+    label: "{{ item.kind }}"
+
+- name: Remove the client pod
+  kubernetes.core.k8s:
+    state: absent
+    namespace: "{{ maas_namespace }}"
+    kind: Pod
+    api_version: v1
+    name: maas-client
+
+- name: Remove the MaaS's Secrets
+  kubernetes.core.k8s:
+    state: absent
+    namespace: "{{ maas_namespace }}"
+    kind: Secret
+    api_version: v1
+    name: "{{ item }}"
+  loop: [maas-db, maas-sso-db, maas-sso-admin, maas-portal-oidc, maas-sso-github, maas-tui-key, maas-usage-oidc]
+  loop_control:
+    label: "{{ item }}"
+
+# Optional, with -e maas_wipe_data=true: also wipe the databases from the
+# storage volume, so the next deploy is a fresh install.
+- name: Wipe the databases from the storage volume
+  ansible.builtin.include_tasks: wipe.yml
+  when: maas_wipe_data | default(false) | bool
+
+- name: Note what is left
+  ansible.builtin.debug:
+    msg: >-
+      The MaaS is removed from {{ maas_namespace }}. Database files, backups and
+      metrics on the storage volume (maas/) were kept; delete those separately
+      if you want them gone, or re-run with -e maas_wipe_data=true.
+  when: not (maas_wipe_data | default(false) | bool)
+
+- name: Note what is left
+  ansible.builtin.debug:
+    msg: >-
+      The MaaS is removed from {{ maas_namespace }}, and the databases were
+      wiped from the storage volume; the next deploy is a fresh install.
+      Backups and metrics (maas/) were kept.
+  when: maas_wipe_data | default(false) | bool

@@ -1,0 +1,13 @@
+# Assisted by Claude Opus
+# Rewrites Limitador's limits from the plans; the gateway picks them up
+# without a restart.
+- name: Rewrite Limitador's limits
+  kubernetes.core.k8s_exec:
+    namespace: "{{ maas_namespace }}"
+    pod: "{{ _maas_pod }}"
+    command: python3 /tmp/maas-api.py POST /api/limits '{}'
+  register: _maas_api
+
+- name: Report
+  ansible.builtin.debug:
+    msg: "{{ _maas_api.stdout }}"

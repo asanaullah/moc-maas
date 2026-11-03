@@ -1,0 +1,25 @@
+# Assisted by Claude Opus
+# Sets or updates a plan; groups map onto plans by name.
+- name: Check the arguments
+  ansible.builtin.assert:
+    that:
+      - maas_plan is defined
+      - maas_plan is match('^[A-Za-z0-9._-]+$')
+      - maas_tokens is defined
+      - maas_tokens | int > 0
+      - maas_models | default('') is match('^([A-Za-z0-9._-]+(,[A-Za-z0-9._-]+)*)?$')
+    fail_msg: set maas_plan and maas_tokens; optional maas_window (default 60), maas_days (default 90), maas_models (comma-separated)
+    quiet: true
+
+- name: Set the plan
+  kubernetes.core.k8s_exec:
+    namespace: "{{ maas_namespace }}"
+    pod: "{{ _maas_pod }}"
+    command: "python3 /tmp/maas-api.py POST /api/plans '{{ _maas_body }}'"
+  vars:
+    _maas_body: "{{ {'name': maas_plan, 'tokens': maas_tokens | int, 'window': (maas_window | default(60)) | int, 'days': (maas_days | default(90)) | int, 'models': maas_models | default('') | split(',') | select | list} | to_json }}"
+  register: _maas_api
+
+- name: Report
+  ansible.builtin.debug:
+    msg: "{{ _maas_api.stdout }}"

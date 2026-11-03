@@ -1,0 +1,8 @@
+# Assisted by Claude Opus
+galaxy_info:
+  author: moc-maas
+  description: The user dashboard (tokens used against the plan's budget)
+  license: MIT
+  min_ansible_version: "2.16"
+dependencies:
+  - role: maas_common

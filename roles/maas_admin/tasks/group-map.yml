@@ -1,0 +1,22 @@
+# Assisted by Claude Opus
+# Points a Keycloak group at a plan; members of the group get that plan.
+- name: Check the arguments
+  ansible.builtin.assert:
+    that:
+      - maas_group is defined
+      - maas_group is match('^[A-Za-z0-9._-]+$')
+      - maas_plan is defined
+      - maas_plan is match('^[A-Za-z0-9._-]+$')
+    fail_msg: set maas_group and maas_plan
+    quiet: true
+
+- name: Map the group to the plan
+  kubernetes.core.k8s_exec:
+    namespace: "{{ maas_namespace }}"
+    pod: "{{ _maas_pod }}"
+    command: "python3 /tmp/maas-api.py POST /api/groups '{{ {'group': maas_group, 'plan': maas_plan} | to_json }}'"
+  register: _maas_api
+
+- name: Report
+  ansible.builtin.debug:
+    msg: "{{ _maas_api.stdout }}"

@@ -1,0 +1,28 @@
+# Assisted by Claude Opus
+# Steps 3-7: the model path. Limitador starts with no limits; the admin
+# portal writes them when it starts (step 14).
+- name: Apply the model path (steps 3-7)
+  ansible.builtin.include_role:
+    name: maas_common
+    tasks_from: apply
+  vars:
+    manifests:
+      - emulator.yaml
+      - redis.yaml
+      - limitador.yaml
+      - epp.yaml
+      - client.yaml
+
+- name: Wait for the model path
+  ansible.builtin.include_role:
+    name: maas_common
+    tasks_from: wait_deployments
+  vars:
+    deployments: [maas-sim, maas-redis, maas-limitador, maas-epp]
+
+- name: Wait for the client pod
+  ansible.builtin.include_role:
+    name: maas_common
+    tasks_from: wait_pods
+  vars:
+    pods: [maas-client]

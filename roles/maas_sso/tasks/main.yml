@@ -1,0 +1,24 @@
+# Assisted by Claude Opus
+# Step 10: Keycloak with the GitHub identity provider. Step 11: point the
+# master realm's login page at the local port-forward address, so
+# "oc port-forward deploy/maas-sso 9443:8443" gives a working admin console
+# at https://localhost:9443.
+- name: Apply Keycloak (step 10)
+  ansible.builtin.include_role:
+    name: maas_common
+    tasks_from: apply
+  vars:
+    manifests: [maas-sso.yaml]
+
+- name: Wait for Keycloak
+  ansible.builtin.include_role:
+    name: maas_common
+    tasks_from: wait_deployments
+  vars:
+    deployments: [maas-sso]
+
+- name: Point the admin console at the port-forward address (step 11)
+  ansible.builtin.include_role:
+    name: maas_sso_admin
+  vars:
+    maas_action: init

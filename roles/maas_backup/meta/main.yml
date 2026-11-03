@@ -1,0 +1,8 @@
+# Assisted by Claude Opus
+galaxy_info:
+  author: moc-maas
+  description: Run both database backups now, from their CronJobs
+  license: MIT
+  min_ansible_version: "2.16"
+dependencies:
+  - role: maas_common

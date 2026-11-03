@@ -1,0 +1,8 @@
+# Assisted by Claude Opus
+# The manifests in this repository are written for this cluster and the
+# uat-project namespace; when you adapt them (see the README), keep this file
+# in sync: the playbooks read the namespace and the apps domain from here.
+all:
+  vars:
+    maas_namespace: uat-project
+    maas_apps_domain: apps.oac-dev-workload0.hcp.oac.int.massopen.cloud

@@ -1,0 +1,103 @@
+# Step 27: the user dashboard, its own pod running portal.py in MODE=usage.
+# Users sign in through Keycloak with the maas-usage client (step 26) and see
+# only their own usage: this window against their budget (live from
+# Limitador), the last 24 hours and the last 30 days (from Thanos Query), and
+# their keys. Every query is built server-side and fixed to the signed-in user.
+# Exposed by step 28.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: maas-usage
+  namespace: uat-project
+  labels:
+    app.kubernetes.io/part-of: maas-test
+    app: maas-usage
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: maas-usage
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: maas-test
+        app: maas-usage
+    spec:
+      # No Kubernetes rights needed; it talks to its database, Keycloak,
+      # Limitador and Thanos Query.
+      serviceAccountName: maas-keys
+      automountServiceAccountToken: true
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: maas-usage
+      containers:
+        - name: portal
+          image: registry.access.redhat.com/ubi9/python-312@sha256:2c7a89f9f1e69f2a00036041ef744b45c8830bebcb2f7194f403ca93729bb0cc
+          command: ["sh", "-c"]
+          args:
+            - pip install --quiet --no-cache-dir --target /tmp/deps 'psycopg[binary]==3.2.9'
+              && PYTHONPATH=/tmp/deps exec python3 /opt/maas/portal.py
+          env:
+            - name: MODE
+              value: usage
+            - name: ROUTE_HOST
+              value: maas-usage-uat-project.apps.oac-dev-workload0.hcp.oac.int.massopen.cloud
+            - name: OIDC_ISSUER
+              value: https://maas-sso-uat-project.apps.oac-dev-workload0.hcp.oac.int.massopen.cloud/realms/maas
+            - name: OIDC_BACKCHANNEL
+              value: https://maas-sso.uat-project.svc:8443/realms/maas
+            - name: OIDC_CLIENT_ID
+              value: maas-usage
+            - name: OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef: {name: maas-usage-oidc, key: client-secret}
+            - name: THANOS_URL
+              value: http://maas-thanos-query.uat-project.svc.cluster.local:9090
+            - name: LIMITADOR_URL
+              value: http://maas-limitador.uat-project.svc.cluster.local:8080
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: maas-db, key: DATABASE_URL}
+          ports:
+            - {name: https, containerPort: 8443}
+            - {name: health, containerPort: 8081}
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8081}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: 8081}
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            failureThreshold: 3
+          volumeMounts:
+            - {name: code, mountPath: /opt/maas}
+            - {name: tls, mountPath: /etc/tls, readOnly: true}
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+      volumes:
+        - name: code
+          configMap: {name: maas-portal-code}
+        - name: tls
+          secret: {secretName: maas-usage-tls}
+---
+# The service CA writes a certificate for maas-usage.uat-project.svc into
+# maas-usage-tls; the Route re-encrypts to it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: maas-usage
+  namespace: uat-project
+  annotations:
+    service.beta.openshift.io/serving-cert-secret-name: maas-usage-tls
+  labels:
+    app.kubernetes.io/part-of: maas-test
+spec:
+  selector:
+    app: maas-usage
+  ports:
+    - {name: https, port: 8443, targetPort: 8443}

@@ -1,0 +1,20 @@
+# Assisted by Claude Opus
+- name: Check the group name
+  ansible.builtin.assert:
+    that:
+      - maas_group is defined
+      - maas_group is match('^[A-Za-z0-9._-]+$')
+    fail_msg: set maas_group to a name of letters, digits, dot, underscore or dash
+    quiet: true
+
+- name: Create the group
+  kubernetes.core.k8s_exec:
+    namespace: "{{ maas_namespace }}"
+    pod: "{{ _maas_pod }}"
+    container: keycloak
+    command: "bash /tmp/maas-kcadm.sh group-create {{ maas_group }}"
+  register: _maas_kcadm
+
+- name: Report
+  ansible.builtin.debug:
+    msg: "{{ _maas_kcadm.stdout_lines }}"

@@ -1,0 +1,5 @@
+# Assisted by Claude Opus
+- name: List the plans
+  ansible.builtin.include_tasks: get-list.yml
+  vars:
+    _maas_path: /api/plans

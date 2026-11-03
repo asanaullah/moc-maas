@@ -1,0 +1,7 @@
+collections/
+__pycache__/
+*.pyc
+*.pyo
+*.retry
+.ruff_cache/
+.claude/

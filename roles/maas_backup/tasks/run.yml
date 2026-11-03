@@ -1,0 +1,74 @@
+# Assisted by Claude Opus
+# One backup, from the CronJob named _maas_cronjob: a Job with the CronJob's
+# own pod template, waited on, its last log line printed, then removed.
+- name: Read the CronJob
+  kubernetes.core.k8s_info:
+    kind: CronJob
+    namespace: "{{ maas_namespace }}"
+    name: "{{ _maas_cronjob }}"
+  register: _maas_cronjob_info
+
+- name: Check the CronJob exists
+  ansible.builtin.assert:
+    that: _maas_cronjob_info.resources | length > 0
+    fail_msg: "no CronJob {{ _maas_cronjob }} in {{ maas_namespace }}"
+    quiet: true
+
+- name: Start the backup Job
+  kubernetes.core.k8s:
+    state: present
+    apply: true
+    namespace: "{{ maas_namespace }}"
+    definition:
+      apiVersion: batch/v1
+      kind: Job
+      metadata:
+        name: "{{ _maas_cronjob }}-{{ _maas_backup_stamp }}"
+        labels: "{{ _maas_cronjob_info.resources[0].spec.jobTemplate.metadata.labels | default({}) }}"
+      spec: "{{ _maas_cronjob_info.resources[0].spec.jobTemplate.spec }}"
+
+- name: Wait for the backup to finish
+  kubernetes.core.k8s_info:
+    kind: Job
+    namespace: "{{ maas_namespace }}"
+    name: "{{ _maas_cronjob }}-{{ _maas_backup_stamp }}"
+  register: _maas_backup_job
+  until: >-
+    _maas_backup_job.resources[0].status.conditions | default([])
+    | selectattr('type', 'in', ['Complete', 'Failed'])
+    | selectattr('status', 'equalto', 'True') | list | length > 0
+  retries: "{{ (maas_backup_timeout | int / maas_poll_delay | int) | int }}"
+  delay: "{{ maas_poll_delay }}"
+
+- name: Check it succeeded
+  ansible.builtin.assert:
+    that: >-
+      _maas_backup_job.resources[0].status.conditions | default([])
+      | selectattr('type', 'equalto', 'Failed') | selectattr('status', 'equalto', 'True') | list | length == 0
+    fail_msg: "backup Job {{ _maas_cronjob }}-{{ _maas_backup_stamp }} failed"
+    quiet: true
+
+- name: Find the backup pod
+  kubernetes.core.k8s_info:
+    kind: Pod
+    namespace: "{{ maas_namespace }}"
+    label_selectors: ["job-name={{ _maas_cronjob }}-{{ _maas_backup_stamp }}"]
+  register: _maas_backup_pods
+
+- name: Read the backup's log
+  kubernetes.core.k8s_log:
+    namespace: "{{ maas_namespace }}"
+    name: "{{ _maas_backup_pods.resources[0].metadata.name }}"
+  register: _maas_backup_log
+
+- name: Report the backup
+  ansible.builtin.debug:
+    msg: "{{ _maas_cronjob }}: {{ _maas_backup_log.log_lines | select | list | last }}"
+
+- name: Remove the backup Job
+  kubernetes.core.k8s:
+    state: absent
+    namespace: "{{ maas_namespace }}"
+    kind: Job
+    api_version: batch/v1
+    name: "{{ _maas_cronjob }}-{{ _maas_backup_stamp }}"

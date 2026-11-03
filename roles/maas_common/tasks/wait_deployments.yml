@@ -1,0 +1,20 @@
+# Assisted by Claude Opus
+# Waits until each deployment's current generation is fully rolled out, or
+# maas_rollout_timeout passes.
+- name: Wait for the deployments to roll out
+  kubernetes.core.k8s_info:
+    kind: Deployment
+    namespace: "{{ maas_namespace }}"
+    name: "{{ item }}"
+  register: _maas_dep
+  until: >-
+    _maas_dep.resources | length > 0
+    and (_maas_dep.resources | first).metadata.generation
+        == (_maas_dep.resources | first).status.observedGeneration | default(0)
+    and (_maas_dep.resources | first).spec.replicas
+        == (_maas_dep.resources | first).status.updatedReplicas | default(-1)
+    and (_maas_dep.resources | first).spec.replicas
+        == (_maas_dep.resources | first).status.availableReplicas | default(-1)
+  retries: "{{ (maas_rollout_timeout | int / maas_poll_delay | int) | int }}"
+  delay: "{{ maas_poll_delay }}"
+  loop: "{{ deployments }}"

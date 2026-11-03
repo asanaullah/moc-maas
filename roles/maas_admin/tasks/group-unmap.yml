@@ -1,0 +1,19 @@
+# Assisted by Claude Opus
+- name: Check the arguments
+  ansible.builtin.assert:
+    that:
+      - maas_group is defined
+      - maas_group is match('^[A-Za-z0-9._-]+$')
+    fail_msg: set maas_group to the group's name
+    quiet: true
+
+- name: Unmap the group
+  kubernetes.core.k8s_exec:
+    namespace: "{{ maas_namespace }}"
+    pod: "{{ _maas_pod }}"
+    command: "python3 /tmp/maas-api.py POST /api/groups/delete '{{ {'group': maas_group} | to_json }}'"
+  register: _maas_api
+
+- name: Report
+  ansible.builtin.debug:
+    msg: "{{ _maas_api.stdout }}"
