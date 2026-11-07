@@ -3,10 +3,11 @@
 # All admin consoles on localhost until Ctrl-C:
 #   8081  admin portal    (deploy/maas-admin)
 #   9443  Keycloak admin  (deploy/maas-sso; its login is registered for
-#                          localhost:9443 — deploy.yml step 11)
+#                          localhost:9443 by deploy.yml)
 #   3000  Grafana         (deploy/maas-grafana)
+# The namespace is the first argument (default uat-project).
 set -euo pipefail
-NS=uat-project
+NS="${1:-uat-project}"
 
 # local port, target, pod port, name, address, health URL. Keycloak's admin
 # login is registered for localhost:9443, so keep that one.

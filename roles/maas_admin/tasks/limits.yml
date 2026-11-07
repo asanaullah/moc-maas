@@ -5,7 +5,7 @@
   kubernetes.core.k8s_exec:
     namespace: "{{ maas_namespace }}"
     pod: "{{ _maas_pod }}"
-    command: python3 /tmp/maas-api.py POST /api/limits '{}'
+    command: python3 /tmp/maas-api.py POST /api/limits '{}' {{ _maas_actor_b64 }}
   register: _maas_api
 
 - name: Report

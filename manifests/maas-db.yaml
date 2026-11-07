@@ -1,12 +1,27 @@
-# Step 8: PostgreSQL for the portals: plans, allowed users and key hashes.
-# The password comes from the maas-db Secret, which the uat-harness chart
-# generates. Data lives on uat-project-storage under maas/postgres for this
+# PostgreSQL for the portals: plans, allowed users and key hashes.
+# The password comes from the maas-db Secret, which the secrets role
+# generates. Data lives on {{ maas_namespace }}-storage under maas/postgres for this
 # test; the harness will manage that directory once this is a harness step.
+# The server speaks TLS with the service CA certificate issued for its
+# Service; clients connect with sslmode=verify-full.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: maas-postgres-tls
+  namespace: "{{ maas_namespace }}"
+  labels:
+    app.kubernetes.io/part-of: maas-test
+data:
+  maas-tls.conf: |
+    ssl = on
+    ssl_cert_file = '/tls/tls.crt'
+    ssl_key_file = '/tls/tls.key'
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: maas-db
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   labels:
     app.kubernetes.io/part-of: maas-test
     app: maas-db
@@ -31,6 +46,9 @@ spec:
           envFrom:
             - secretRef:
                 name: maas-db
+          env:
+            # Sized for the portals' pools (keys 2x11, usage 2x11, admin 10), doubled for rollouts, plus backups and admins.
+            - {name: POSTGRESQL_MAX_CONNECTIONS, value: "150"}
           ports:
             - name: postgres
               containerPort: 5432
@@ -41,6 +59,10 @@ spec:
             - name: data
               mountPath: /var/lib/pgsql/data
               subPath: maas/postgres
+            - name: tls
+              mountPath: /tls
+            - name: postgres-cfg
+              mountPath: /opt/app-root/src/postgresql-cfg
           resources:
             requests:
               cpu: 100m
@@ -51,15 +73,24 @@ spec:
       volumes:
         - name: data
           persistentVolumeClaim:
-            claimName: uat-project-storage
+            claimName: "{{ maas_namespace }}-storage"
+        - name: tls
+          secret:
+            secretName: maas-db-tls
+            defaultMode: 0600
+        - name: postgres-cfg
+          configMap:
+            name: maas-postgres-tls
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: maas-db
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   labels:
     app.kubernetes.io/part-of: maas-test
+  annotations:
+    service.beta.openshift.io/serving-cert-secret-name: maas-db-tls
 spec:
   selector:
     app: maas-db
@@ -68,14 +99,14 @@ spec:
       port: 5432
       targetPort: 5432
 ---
-# Daily logical backup to uat-project-storage under maas/backups, keeping the
+# Daily logical backup to {{ maas_namespace }}-storage under maas/backups, keeping the
 # last 14. Start one by hand with:
-#   oc create job -n uat-project maas-db-backup-now --from=cronjob/maas-db-backup
+#   oc create job -n {{ maas_namespace }} maas-db-backup-now --from=cronjob/maas-db-backup
 apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: maas-db-backup
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   labels:
     app.kubernetes.io/part-of: maas-test
 spec:
@@ -103,7 +134,7 @@ spec:
               args:
                 - set -euo pipefail;
                   f=/backup/maas-$(date -u +%Y%m%dT%H%M%SZ).dump;
-                  pg_dump -h maas-db -U "$POSTGRESQL_USER" -d "$POSTGRESQL_DATABASE" -Fc -f "$f.partial";
+                  pg_dump -h maas-db.{{ maas_namespace }}.svc -U "$POSTGRESQL_USER" -d "$POSTGRESQL_DATABASE" -Fc -f "$f.partial";
                   mv "$f.partial" "$f";
                   ls -1t /backup/maas-*.dump | tail -n +15 | xargs -r rm -f;
                   echo "wrote $f ($(stat -c %s "$f") bytes)"
@@ -117,6 +148,9 @@ spec:
                 - name: PGPASSWORD
                   valueFrom:
                     secretKeyRef: {name: maas-db, key: POSTGRESQL_PASSWORD}
+                # Check the server's certificate against the service CA.
+                - {name: PGSSLMODE, value: verify-full}
+                - {name: PGSSLROOTCERT, value: /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt}
               volumeMounts:
                 - name: backup
                   mountPath: /backup
@@ -131,4 +165,4 @@ spec:
           volumes:
             - name: backup
               persistentVolumeClaim:
-                claimName: uat-project-storage
+                claimName: "{{ maas_namespace }}-storage"

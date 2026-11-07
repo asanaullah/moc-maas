@@ -1,4 +1,4 @@
-# Step 6: the endpoint picker. It watches the InferencePool and its pods and
+# The endpoint picker. It watches the InferencePool and its pods and
 # tells the gateway which emulator pod gets each request. Prefix-cache scoring
 # carries the most weight, for chat; flow control holds requests while the
 # pool is busy or at zero replicas.
@@ -6,7 +6,7 @@ apiVersion: inference.networking.k8s.io/v1
 kind: InferencePool
 metadata:
   name: maas-pool
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   labels:
     app.kubernetes.io/part-of: maas-test
 spec:
@@ -25,7 +25,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: maas-epp-config
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   labels:
     app.kubernetes.io/part-of: maas-test
 data:
@@ -38,6 +38,21 @@ data:
       - type: queue-scorer
       - type: kv-cache-utilization-scorer
       - type: max-score-picker
+      # The model pods serve TLS. The picker scrapes them by pod IP and can't
+      # set the server name to check (v1.0.0 has a CA path but no server name),
+      # so the scrape is encrypted but not verified; it carries load metrics
+      # only. Requests go through the gateway, which does check the name.
+      - type: metrics-data-source
+        parameters:
+          scheme: https
+          path: /metrics
+          insecureSkipVerify: true
+      - type: core-metrics-extractor
+    dataLayer:
+      sources:
+        - pluginRef: metrics-data-source
+          extractors:
+            - pluginRef: core-metrics-extractor
     schedulingProfiles:
       - name: default
         plugins:
@@ -53,7 +68,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: maas-epp
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   labels:
     app.kubernetes.io/part-of: maas-test
     app: maas-epp
@@ -68,14 +83,14 @@ spec:
         app.kubernetes.io/part-of: maas-test
         app: maas-epp
     spec:
-      # From the uat-harness chart: read access to the pool and its pods.
+      # From manifests/prereqs: read access to the pool and its pods.
       serviceAccountName: uat-epp
       containers:
         - name: epp
-          image: ghcr.io/llm-d/llm-d-router-endpoint-picker:v1.0.0
+          image: ghcr.io/llm-d/llm-d-router-endpoint-picker@sha256:024188e998f516879f68532016ca24fabca00afbdcc2af9a61b17634e197df2c
           args:
             - --pool-name=maas-pool
-            - --pool-namespace=uat-project
+            - --pool-namespace={{ maas_namespace }}
             - --config-file=/etc/epp/config.yaml
             - --grpc-port=9002
             - --metrics-port=9090
@@ -119,13 +134,13 @@ spec:
           secret:
             secretName: maas-epp-tls
 ---
-# The service CA writes a certificate for maas-epp.uat-project.svc into the
+# The service CA writes a certificate for maas-epp.{{ maas_namespace }}.svc into the
 # maas-epp-tls Secret.
 apiVersion: v1
 kind: Service
 metadata:
   name: maas-epp
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   annotations:
     service.beta.openshift.io/serving-cert-secret-name: maas-epp-tls
   labels:

@@ -1,7 +1,7 @@
-# Step 22: Thanos Store, Query and Compactor, reading the metrics folder on
-# uat-project-storage (step 20) alongside the Prometheus sidecar (step 21).
+# Thanos Store, Query and Compactor, reading the metrics bucket
+# alongside the Prometheus sidecar.
 #
-#   Store      serves the blocks in the metrics folder
+#   Store      serves the blocks in the metrics bucket
 #   Query      the one address Grafana and the user dashboard query
 #              (maas-thanos-query:9090); merges Prometheus's recent hours with
 #              the folder's history, and picks downsampled data for long ranges
@@ -16,7 +16,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: maas-thanos-store
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   labels:
     app.kubernetes.io/part-of: maas-test
     app: maas-thanos-store
@@ -53,10 +53,12 @@ spec:
             httpGet: {path: /-/healthy, port: 10902}
             initialDelaySeconds: 30
             periodSeconds: 20
+          env:
+            - {name: SSL_CERT_FILE, value: /etc/maas-s3-ca/s3-ca.crt}
           volumeMounts:
             - {name: data, mountPath: /data}
             - {name: objstore, mountPath: /etc/thanos, readOnly: true}
-            - {name: blocks, mountPath: /thanos/blocks, subPath: maas/metrics, readOnly: true}
+            - {name: s3-ca, mountPath: /etc/maas-s3-ca, readOnly: true}
             - {name: grpc-tls, mountPath: /etc/tls/grpc, readOnly: true}
           resources:
             requests: {cpu: 50m, memory: 128Mi}
@@ -66,9 +68,9 @@ spec:
         - name: data
           emptyDir: {sizeLimit: 5Gi}
         - name: objstore
-          configMap: {name: maas-thanos-objstore}
-        - name: blocks
-          persistentVolumeClaim: {claimName: uat-project-storage}
+          secret: {secretName: maas-thanos-objstore}
+        - name: s3-ca
+          configMap: {name: maas-s3-ca}
         - name: grpc-tls
           secret: {secretName: maas-thanos-grpc-tls}
 ---
@@ -76,7 +78,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: maas-thanos-store
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   labels:
     app.kubernetes.io/part-of: maas-test
 spec:
@@ -89,7 +91,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: maas-thanos-query
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   labels:
     app.kubernetes.io/part-of: maas-test
     app: maas-thanos-query
@@ -113,11 +115,11 @@ spec:
             # own metrics on 9090.
             - --http-address=0.0.0.0:9090
             - --grpc-address=127.0.0.1:10901
-            - --endpoint=maas-prometheus.uat-project.svc.cluster.local:10901
-            - --endpoint=maas-thanos-store.uat-project.svc.cluster.local:10901
+            - --endpoint=maas-prometheus.{{ maas_namespace }}.svc.cluster.local:10901
+            - --endpoint=maas-thanos-store.{{ maas_namespace }}.svc.cluster.local:10901
             - --grpc-client-tls-secure
             - --grpc-client-tls-ca=/var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt
-            - --grpc-client-server-name=maas-thanos-grpc.uat-project.svc
+            - --grpc-client-server-name=maas-thanos-grpc.{{ maas_namespace }}.svc
             - --query.auto-downsampling
             - --web.disable-cors
           ports:
@@ -136,7 +138,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: maas-thanos-query
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   labels:
     app.kubernetes.io/part-of: maas-test
 spec:
@@ -149,7 +151,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: maas-thanos-compact
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   labels:
     app.kubernetes.io/part-of: maas-test
     app: maas-thanos-compact
@@ -188,10 +190,12 @@ spec:
             httpGet: {path: /-/healthy, port: 10902}
             initialDelaySeconds: 30
             periodSeconds: 20
+          env:
+            - {name: SSL_CERT_FILE, value: /etc/maas-s3-ca/s3-ca.crt}
           volumeMounts:
             - {name: data, mountPath: /data}
             - {name: objstore, mountPath: /etc/thanos, readOnly: true}
-            - {name: blocks, mountPath: /thanos/blocks, subPath: maas/metrics}
+            - {name: s3-ca, mountPath: /etc/maas-s3-ca, readOnly: true}
           resources:
             requests: {cpu: 50m, memory: 128Mi}
             limits: {cpu: "1", memory: 1Gi}
@@ -200,6 +204,6 @@ spec:
         - name: data
           emptyDir: {sizeLimit: 10Gi}
         - name: objstore
-          configMap: {name: maas-thanos-objstore}
-        - name: blocks
-          persistentVolumeClaim: {claimName: uat-project-storage}
+          secret: {secretName: maas-thanos-objstore}
+        - name: s3-ca
+          configMap: {name: maas-s3-ca}

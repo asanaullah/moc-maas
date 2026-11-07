@@ -1,0 +1,34 @@
+# Assisted by Claude Opus
+# Runs the smoke test against a deployed MaaS: one short-lived service key on
+# a dedicated tiny plan, every expected answer checked through the public
+# gateway Route, then the key revoked and the plan deleted. deploy.yml runs
+# this after every deploy where the public Routes exist; it can also be run
+# by hand:
+#
+#   ansible-playbook -i clusters/<cluster>.yml playbooks/smoke-test.yml
+#
+# It needs the gateway's public Route (deploy with -e maas_routes=true).
+- name: Smoke-test the MaaS
+  hosts: localhost
+  gather_facts: false
+  # maas_common contributes only shared defaults (the gateway's URL among
+  # them); it has no tasks of its own.
+  roles:
+    - maas_common
+  tasks:
+    - name: Check the gateway's public Route exists
+      kubernetes.core.k8s_info:
+        kind: Route
+        namespace: "{{ maas_namespace }}"
+        name: maas-gateway
+      register: _maas_smoke_route
+
+    - name: Run the smoke test
+      ansible.builtin.include_role:
+        name: maas_smoke
+      when: _maas_smoke_route.resources | length > 0
+
+    - name: Note the skip
+      ansible.builtin.debug:
+        msg: "the gateway has no public Route in {{ maas_namespace }}; deploy with -e maas_routes=true first"
+      when: _maas_smoke_route.resources | length == 0

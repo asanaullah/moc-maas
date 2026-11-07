@@ -20,7 +20,7 @@ We wanted a MaaS with these constraints:
 | | |
 |---|---|
 | Model API | `https://maas-gateway-<namespace>.<apps domain>/v1/...`, OpenAI-compatible |
-| API keys | users create their own after signing in with GitHub; admins create service keys for applications |
+| API keys | users create their own after signing in with GitHub; admins create service keys for applications; at most five active keys per owner |
 | Plans | allowed models, a token budget per time window, and a maximum key lifetime, assigned through Keycloak groups |
 | Token budgets | enforced per user by Limitador, counted from each response's `usage` |
 | Dashboards | a Grafana for admins (port-forward only) and a usage page for each user |
@@ -80,12 +80,12 @@ forward.sh     admin consoles on localhost, until Ctrl-C
 maas-tui.py    a live terminal view of the running MaaS
 ```
 
-The manifests are static and named for what they deploy; the playbooks own the ordering. Two ConfigMaps are generated at deploy time instead of living in git: the portals' code (from `portal.py`) and Grafana's dashboards (from `gen-dashboards.py`). The playbooks read the namespace and the apps domain from the cluster inventory, so `clusters/<cluster>.yml` is the one place the deploy knows which cluster it is on.
+The manifests are named for what they deploy and rendered as templates on the cluster inventory — the namespace and the apps domain; the playbooks own the ordering. Two ConfigMaps are generated at deploy time instead of living in git: the portals' code (from `portal.py`) and Grafana's dashboards (from `gen-dashboards.py`). So `clusters/<cluster>.yml` is the one place the deploy knows which cluster and namespace it is on.
 
 ## Prerequisites
 
 - A namespace, with the permissions below granted to its members and service accounts.
-- A ReadWriteMany PersistentVolumeClaim in the namespace, for database files, backups and metric blocks.
+- A ReadWriteMany PersistentVolumeClaim named `<namespace>-storage` in the namespace, for database files, backups and metric blocks.
 - Egress from the namespace to the container registries, to GitHub (the gateway downloads the pinned wasm-shim at start) and to PyPI (the portals install their PostgreSQL driver at start).
 - A GitHub OAuth App, with:
   - Homepage URL: `https://maas-sso-<namespace>.<apps domain>`
@@ -96,47 +96,16 @@ The manifests are static and named for what they deploy; the playbooks own the o
 
 Everything is namespaced. A cluster admin creates these once, in the namespace.
 
-**Project members** (the MaaS admins) need:
+The Role for project members (the MaaS admins), the three service accounts and their Roles are in `manifests/prereqs/`. `deploy.yml` doesn't apply them; a cluster admin applies them once and binds the members' Role to the project's members group:
 
-```yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: maas-project-admin
-rules:
-  - apiGroups: [""]
-    resources: ["pods", "pods/log"]
-    verbs: ["create", "get", "list", "watch", "delete"]
-  - apiGroups: [""]
-    resources: ["pods/exec", "pods/portforward"]
-    verbs: ["create", "get"]
-  - apiGroups: [""]
-    resources: ["services", "configmaps", "secrets"]
-    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
-  - apiGroups: [""]
-    resources: ["events"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["apps"]
-    resources: ["deployments"]
-    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
-  - apiGroups: ["apps"]
-    resources: ["replicasets"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["batch"]
-    resources: ["jobs"]
-    verbs: ["create", "get", "list", "watch", "delete"]
-  - apiGroups: ["batch"]
-    resources: ["cronjobs"]
-    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
-  - apiGroups: ["route.openshift.io"]
-    resources: ["routes"]
-    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
-  - apiGroups: ["inference.networking.k8s.io"]
-    resources: ["inferencepools"]
-    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+```sh
+oc apply -n <namespace> -f manifests/prereqs/
+oc create rolebinding maas-project-admin -n <namespace> --role=maas-project-admin --group=<members group>
 ```
 
-`pods/exec` is how the playbooks run the Keycloak and admin-portal commands inside their pods (both portals' admin APIs stay on pod-localhost, so this adds no reach the old port-forward didn't have); `pods/portforward` is how admins reach the admin portal, the Keycloak console and Grafana.
+On oac-dev-workload0 the uat-harness chart (in `oac-apps-fork`) applies this RBAC, and the members group for `uat-project` is `project_uat`.
+
+`pods/exec` is how the playbooks run the Keycloak and admin-portal commands inside their pods (both portals' admin APIs stay on pod-localhost, so this adds no reach the old port-forward didn't have); `pods/portforward` is how admins reach the admin portal, the Keycloak console and Grafana. The COSI rules (create and get on `bucketclaims` and `bucketaccesses`) are for the metrics bucket.
 
 **Service accounts** used by the manifests:
 
@@ -157,11 +126,11 @@ MOC_MAAS_CLIENTID=… MOC_MAAS_SECRET=… \
 ansible-playbook -i clusters/oac-dev-workload0.yml playbooks/first-plan.yml
 ```
 
-`deploy.yml` is safe to re-run: it applies the same manifests, only creates Secrets that are missing, and restarts deployments to pick up changed code and config. The public Routes are left out unless you ask for them (`-e maas_routes=true`), so the MaaS can come up without public endpoints first.
+`deploy.yml` is safe to re-run: it applies the same manifests, only creates Secrets that are missing, and restarts deployments to pick up changed code and config. The public Routes are left out unless you ask for them (`-e maas_routes=true`), so the MaaS can come up without public endpoints first. To deploy into another namespace of the same cluster, pass `-e maas_namespace=<name>`; every manifest renders for it, and the namespace must already meet the [prerequisites](#prerequisites).
 
 The GitHub OAuth App's client ID and secret (`MOC_MAAS_CLIENTID` and `MOC_MAAS_SECRET` in the environment) are only needed while `maas-sso-github` doesn't exist yet — a re-deploy never touches an existing one, so stale environment values can't rotate it by accident. `playbooks/github-secret.yml` creates or rotates it on purpose. Secret values are never printed.
 
-To redeploy from scratch over an earlier installation, run `playbooks/teardown.yml -e maas_wipe_data=true` first. The wipe exists for Keycloak: its database keeps the bootstrap-admin password it was first given and never resets it from the Secret on later starts, so a redeploy over an old database with a regenerated `maas-sso-admin` leaves the admin login broken. The PostgreSQL images, unlike Keycloak, reset their user's password from the Secret on every start.
+A teardown without wipe keeps the databases and the generated Secrets they need, so a later `deploy.yml` matches them. To redeploy from scratch, run `playbooks/teardown.yml -e maas_wipe_data=true` first: it wipes the databases and deletes their Secrets together. (Keycloak's database keeps the bootstrap-admin password it was first given and never resets it from the Secret.) The playbooks sign in to Keycloak as their own `maas-kcadm` client once the first deploy has created it, so they don't depend on the bootstrap admin after that.
 
 `deploy.yml` runs one play per component, in dependency order:
 
@@ -173,7 +142,7 @@ To redeploy from scratch over an earlier installation, run `playbooks/teardown.y
 | Keycloak | `maas-sso` | Keycloak, realm `maas`; admin console login pointed at the port-forward |
 | Portals | `maas-portals` (+ `portal.py`) | the portal code as a ConfigMap; the admin and key portals |
 | Gateway | `gateway` | the Envoy gateway |
-| Metrics | `metrics-store`, `prometheus`, `thanos` | Prometheus with a Thanos sidecar; Thanos Store, Query and Compactor |
+| Metrics | `prometheus`, `thanos` | the metrics bucket (a COSI BucketClaim and BucketAccess), Prometheus with a Thanos sidecar; Thanos Store, Query and Compactor |
 | Grafana | `grafana` (+ `gen-dashboards.py`) | the admin Grafana and its dashboards |
 | User dashboard | `maas-usage` | the user dashboard and its Keycloak client |
 | Public addresses | `maas-keys-route`, `maas-sso-route`, `maas-gateway-route`, `maas-usage-route` | the public Routes — only with `-e maas_routes=true` |
@@ -188,10 +157,11 @@ Run everything from the repository root. `<cluster>` below is your inventory fil
 |---|---|
 | `ansible-playbook -i clusters/<cluster>.yml playbooks/admin.yml -e maas_action=<action>` | plans, group mappings, service keys, revocation, audit (actions listed in the playbook) |
 | `ansible-playbook -i clusters/<cluster>.yml playbooks/sso-admin.yml -e maas_action=<action>` | Keycloak groups and users |
-| `MOC_MAAS_KEY=… ansible-playbook -i clusters/<cluster>.yml playbooks/test-gateway.yml` | one request through the public gateway; prints the response and the HTTP status |
+| `MOC_MAAS_KEY=… ansible-playbook -i clusters/<cluster>.yml playbooks/test-gateway.yml` | one request through the public gateway; prints the response and the HTTP status (streaming and `include_usage` with `-e maas_stream=true -e maas_include_usage=true`) |
 | `ansible-playbook -i clusters/<cluster>.yml playbooks/backup-now.yml` | runs both database backups now, from their CronJobs |
 | `ansible-playbook -i clusters/<cluster>.yml playbooks/github-secret.yml` | creates or rotates the GitHub Secret |
-| `ansible-playbook -i clusters/<cluster>.yml playbooks/teardown.yml` | removes the MaaS from the namespace; database files, backups and metrics stay on the volume (`-e maas_wipe_data=true` also wipes the databases, for a fresh install) |
+| `ansible-playbook -i clusters/<cluster>.yml playbooks/restore-test.yml` | restores the newest dumps into throwaway databases and prints their counts next to the live ones |
+| `ansible-playbook -i clusters/<cluster>.yml playbooks/teardown.yml` | removes the MaaS from the namespace; database files and backups stay on the volume with the Secrets they need, and the metrics bucket is left alone (`-e maas_wipe_data=true` also wipes the databases and their Secrets, for a fresh install) |
 | `./forward.sh` | the admin portal, Keycloak console and Grafana on localhost until Ctrl-C |
 | `./maas-tui.py` | a live terminal view of simulated users with real keys: budgets, 429s, which pod served each request |
 
@@ -211,29 +181,40 @@ ansible-playbook -i clusters/oac-dev-workload0.yml playbooks/sso-admin.yml \
 
 **Public addresses:** the sso Route has no landing page — the Envoy sidecar in front of Keycloak answers only `/realms/maas/` and `/resources/` and 404s everything else, including `/` and `/admin/`. That is deliberate: the public address can serve realm logins and GitHub callbacks, but never the admin console or the master realm. Users start at the key portal (`https://maas-keys-<namespace>.<apps domain>/`); the Keycloak admin console is reached with `./forward.sh` at `https://localhost:9443/admin/` (the certificate is for the Service name, so the browser warns).
 
-**Adding a user:** the user signs in to the key portal with GitHub, then an admin adds them to a Keycloak group that is mapped to a plan (the `add` example above). After signing in again, the user can create keys.
+**Adding a user:** the user signs in to the key portal with GitHub, then an admin adds them to a Keycloak group that is mapped to a plan (the `add` example above). After signing in again, the user can create keys. Keep MaaS groups top-level; a subgroup's name isn't distinguished from a top-level group's.
+
+**Users in several groups** get one plan: the mapped plan with the highest priority (`-e maas_priority=`, default 0), then the highest rate (tokens per second), then the name. Its budget, models and key lifetime all apply. Each user holds at most five active keys and creates at most ten per hour.
+
+**How budgets behave:** tokens are counted from each response's `usage` *after* the response is served, so the budget is a soft limit — a user at the edge of their budget can overshoot by roughly concurrency × the request's size. A request that names no `max_tokens` is bounded only by the model's context length. Two optional plan settings bound the overshoot: `max_request_tokens` (`-e maas_max_request_tokens=`) refuses requests whose `max_tokens` or `max_completion_tokens` is above it, or that name neither; `max_requests` (`-e maas_max_requests=`) caps each user's requests per window (429 with `x-maas-refusal: requests` and a JSON error body, like budget refusals). With both, the overshoot is at most `max_requests × max_request_tokens`. A budget window starts at the user's first request after the previous window expired (Limitador sets a counter's expiry on first use and doesn't move it), so a user can spend one budget at the end of a window and another at the start of the next. For plans with windows over an hour, an hourly cap bounds that: by default twice the plan's average hourly rate (a daily plan of 24,000 tokens allows 2,000 per hour), or the plan's own `hourly_tokens` (`-e maas_hourly_tokens=`, 0 for none). Streaming requests must set `stream_options.include_usage: true` (the gateway refuses them otherwise), so every accepted stream is charged.
+
+**Restoring a backup:** the daily `pg_dump`s land on the storage volume under `maas/backups` (portals) and `maas/sso-backups` (Keycloak). To restore: stop the portals (`oc scale deploy/maas-admin deploy/maas-keys deploy/maas-usage --replicas=0`), point the database at the dump (`pg_restore -U maas -d maas /backup/<file>` inside a pod that mounts the volume, after clearing or recreating the database), scale the portals back up, and run `admin.yml -e maas_action=limits` so Limitador's limits match the restored plans. `playbooks/restore-test.yml` restores the latest dumps into throwaway databases and prints sanity counts, so the dumps are known-restorable without touching the live ones; run it after any schema change and regularly.
+
+**A dead node:** if a node is down and a database pod shows `Terminating` or `Unknown`, first confirm with the cluster admin that the node is really off. Only then run `oc delete pod -n <namespace> <pod> --force --grace-period=0`. Never force-delete while the node might still be running: two database servers on the shared volume corrupt it.
 
 **Setting limits:** define plans and map groups to them (the `plan-set` and `group-map` examples above). The admin portal writes Limitador's limits; don't edit the `maas-limits` ConfigMap by hand.
 
 **Viewing usage:** admins use Grafana (dashboards "MaaS usage" and "MaaS serving"); users see their own usage on the user dashboard.
 
+**Alerts:** the MaaS Prometheus evaluates the alerting rules in `manifests/prometheus.yaml` (`alerts.yml`): unreachable targets, a stopped or refusing reconciler, plans without a loaded limit, Limitador's limits unreadable, key-check connection failures, a filling volume, database connections near the limit, failed metric uploads and a halted compactor. Firing alerts show in the "Health" row of the "MaaS serving" dashboard and at Prometheus's `/alerts`. They aren't sent anywhere yet.
+
 ## Adapting to your cluster
 
-The manifests are written for one deployment. Before applying them elsewhere, change:
+The namespace is a variable throughout: the manifests render for it, the playbooks and generated ConfigMaps read it from the inventory, the portals read it from their own service account, and the shared volume is expected as `<namespace>-storage`. Per cluster, copy `clusters/oac-dev-workload0.yml` and set:
 
-- the namespace: `uat-project` in `manifests/` and in `forward.sh`, and `maas_namespace` in your cluster inventory — the playbooks, the generated ConfigMaps and the Keycloak wrapper read it from the inventory or the pod itself
-- the Route hostnames and Keycloak issuer, which embed the namespace and the cluster's apps domain: `manifests/maas-sso.yaml`, `manifests/maas-portals.yaml`, `manifests/prometheus.yaml`, `manifests/maas-usage.yaml`, and `maas_apps_domain` in the cluster inventory
-- the shared volume's claim name, `uat-project-storage`, in `manifests/maas-db.yaml`, `manifests/maas-sso-db.yaml`, `manifests/prometheus.yaml` and `manifests/thanos.yaml`, and as `maas_storage_claim` in `roles/maas_common/defaults/main.yml` (the teardown's wipe step reads it)
+- `maas_namespace` — the namespace to deploy into by default (any other with `-e maas_namespace=<name>`)
+- `maas_apps_domain` — the cluster's apps domain, which the Route hostnames and the Keycloak issuer embed
+- `maas_s3_endpoint` — the object-storage endpoint the metrics bucket is reached through, and the COSI class names in `roles/maas_metrics/defaults/main.yml` (`fb-bucket` and `fb-access-rw` here)
+- `maas_s3_ca` — the PEM of the CA that signs the S3 endpoint's certificate; leave it out to use the cluster's ingress CA (`openshift-config-managed/default-ingress-cert`), if your user can read it
+- `maas_route_concurrent_tcp` and `maas_route_rate_http` — the router's per-address limits on the public Routes, and `maas_gateway_rate_per_second` and `maas_gateway_rate_burst` — each gateway pod's request-rate cap (defaults 50 connections and 100 requests per address, 200 per second with bursts of 400 per pod, in `roles/maas_common/defaults/main.yml`). These protect the key check before the caller is known, so they can't be per plan; a plan's own request limit is `max_requests`.
+- `maas_gateway_drain_seconds` — how long a stopping gateway pod keeps serving, so rollouts and node drains don't cut generations (default 120); set it above your longest generation
 - the endpoint picker's service account name, `uat-epp`, in `manifests/epp.yaml`, if you name it differently
-
-Copy `clusters/oac-dev-workload0.yml` to a new file per cluster; that is the inventory the playbooks take with `-i`.
 
 ## Current limitations
 
-- The model is an emulator; serving a real model means replacing the model Deployment with vLLM on GPUs.
-- One PostgreSQL instance each, with daily backups; restores haven't been tested.
-- Rotating `maas-sso-admin` does not change the password already stored in Keycloak's database; wipe the databases (`teardown.yml -e maas_wipe_data=true`) and redeploy for a working admin login.
+- The model is an emulator; serving a real model means replacing the model Deployment with vLLM on GPUs, with the same `--ssl-certfile` and `--ssl-keyfile` arguments and the `maas-sim-tls` certificate (or one for the new Service's name, which the gateway's `original_destination_cluster` checks). The model pods serve TLS; the gateway checks their certificate, while the endpoint picker's metric scrape is encrypted but unverified (v1.0.0 can't set the name to check against a pod IP).
+- One PostgreSQL instance each, with daily backups on the same volume as the data; `restore-test.yml` checks the dumps restore.
+- Rotating `maas-sso-admin` does not change the password already stored in Keycloak's database; the playbooks use their own `maas-kcadm` client, so only the console login is affected.
 - Redis has no password and no persistence; restarting Redis resets the current budget windows.
-- Metric history uses Thanos's filesystem store on the shared volume, which Thanos doesn't recommend for production; it can move to an object storage bucket by changing `manifests/metrics-store.yaml` and the mounts.
+- Metric history is in an S3 bucket provisioned through COSI; its endpoint's CA comes from `maas_s3_ca` or the cluster's ingress CA.
 - The portals install their PostgreSQL driver from PyPI at start; a built image would remove that dependency.
-- Before opening the Routes to real users, add router and Envoy limits (IP allowlists, connection and request-rate limits, request size limits).
+- The Routes and the gateway have connection and request-rate limits (per client address at the router, per pod in Envoy) and a 4 MiB request size limit; there are no IP allowlists.

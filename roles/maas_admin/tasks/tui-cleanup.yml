@@ -1,0 +1,13 @@
+# Assisted by Claude Opus
+# Deletes tui-* plans whose keys are all gone, left behind by maas-tui.py
+# runs that were killed before their own cleanup ran.
+- name: Delete leftover TUI plans
+  kubernetes.core.k8s_exec:
+    namespace: "{{ maas_namespace }}"
+    pod: "{{ _maas_pod }}"
+    command: python3 /tmp/maas-api.py POST /api/plans/tui-cleanup '{}' {{ _maas_actor_b64 }}
+  register: _maas_api
+
+- name: Report
+  ansible.builtin.debug:
+    msg: "{{ _maas_api.stdout }}"

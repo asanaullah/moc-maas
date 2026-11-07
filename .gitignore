@@ -5,3 +5,4 @@ __pycache__/
 *.retry
 .ruff_cache/
 .claude/
+build/

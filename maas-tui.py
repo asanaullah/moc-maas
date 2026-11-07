@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Live view of the MaaS in uat-project, driven like real clients.
+"""Live view of the MaaS, driven like real clients.
 
 Pick a set of simulated users, each with a random request type and token
 budget, then watch the gateway serve them: requests per replica, tokens
 counted by Limitador against each user's budget, and 429s once a budget runs
 out.
 
-    ./maas-tui.py               # uses the current oc login
+    ./maas-tui.py [namespace]     # uses the current oc login
 
 Each session creates, through the admin portal's API, one plan per simulated
 user (its budget, model maas-sim) and one service key on it, and sends that
@@ -21,6 +21,7 @@ import curses
 import json
 import locale
 import random
+import signal
 import socket
 import subprocess
 import sys
@@ -29,7 +30,7 @@ import time
 import urllib.error
 import urllib.request
 
-NS = "uat-project"
+NS = sys.argv[1] if len(sys.argv) > 1 else "uat-project"
 CLIENT = "maas-client"
 WINDOW = 60  # seconds per budget window
 TYPES = ["chat", "tool-call", "research"]
@@ -316,7 +317,7 @@ def setup_screen(scr, users, duration, rng):
     sel = 0
     while True:
         scr.erase()
-        put(scr, 0, 0, "MaaS test · uat-project · pick users", curses.A_BOLD)
+        put(scr, 0, 0, "MaaS test · " + NS + " · pick users", curses.A_BOLD)
         put(scr, 1, 0, f"budget window {WINDOW}s · run for {duration}s")
         put(scr, 3, 0, f"   {'USER':<8}{'TYPE':<10}{'BUDGET/WINDOW':>14}", curses.A_UNDERLINE)
         for i, u in enumerate(users):
@@ -455,5 +456,12 @@ if __name__ == "__main__":
     except (OSError, subprocess.CalledProcessError):
         sys.exit("needs a working oc login")
     locale.setlocale(locale.LC_ALL, "")
-    curses.wrapper(main)
+    # A closed terminal or a kill runs the same cleanup as Ctrl-C: revoke the
+    # session's keys and delete its plans.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
+    signal.signal(signal.SIGHUP, lambda *_: sys.exit(1))
+    try:
+        curses.wrapper(main)
+    except SystemExit:
+        pass
     print("session keys revoked and session plans deleted")

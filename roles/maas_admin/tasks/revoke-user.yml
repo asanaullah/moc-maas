@@ -1,0 +1,20 @@
+# Assisted by Claude Opus
+# Revokes every active key of one owner and ends their sessions.
+- name: Check the arguments
+  ansible.builtin.assert:
+    that:
+      - maas_email is defined
+      - maas_email is match('^[A-Za-z0-9._@-]+$')
+    fail_msg: set maas_email to the owner's email
+    quiet: true
+
+- name: Revoke the user's keys
+  kubernetes.core.k8s_exec:
+    namespace: "{{ maas_namespace }}"
+    pod: "{{ _maas_pod }}"
+    command: "python3 /tmp/maas-api.py POST /api/users/revoke '{{ {'owner': maas_email} | to_json }}' {{ _maas_actor_b64 }}"
+  register: _maas_api
+
+- name: Report
+  ansible.builtin.debug:
+    msg: "{{ _maas_api.stdout }}"

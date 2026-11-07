@@ -7,12 +7,12 @@
 #     ansible-playbook -i clusters/oac-dev-workload0.yml playbooks/deploy.yml
 #
 # The GitHub credentials are the OAuth App that Keycloak brokers logins
-# through (step 2); they are only needed while maas-sso-github doesn't exist
+# through; they are only needed while maas-sso-github doesn't exist
 # yet — a re-deploy leaves an existing one alone. The public addresses
-# (steps 16-18 and 28) are installed too when asked for:
+# are installed too when asked for:
 #
 #   ansible-playbook -i clusters/oac-dev-workload0.yml playbooks/deploy.yml -e maas_routes=true
-- name: Secrets (steps 1-2)
+- name: Secrets
   hosts: localhost
   gather_facts: false
   pre_tasks:
@@ -26,60 +26,63 @@
   roles:
     - maas_secrets
 
-- name: Model path (steps 3-7)
+- name: Model path
   hosts: localhost
   gather_facts: false
   roles:
     - maas_model
 
-- name: Databases (steps 8-9)
+- name: Databases
   hosts: localhost
   gather_facts: false
   roles:
     - maas_databases
 
-- name: Keycloak (steps 10-11)
+- name: Keycloak
   hosts: localhost
   gather_facts: false
   roles:
     - maas_sso
 
-- name: Portals (steps 12-14)
+- name: Portals
   hosts: localhost
   gather_facts: false
   roles:
     - maas_portals
 
-- name: Gateway (step 15)
+- name: Gateway
   hosts: localhost
   gather_facts: false
   roles:
     - maas_gateway
 
-- name: Metrics (steps 20-22)
+- name: Metrics
   hosts: localhost
   gather_facts: false
   roles:
     - maas_metrics
 
-- name: Grafana (steps 23-25)
+- name: Grafana
   hosts: localhost
   gather_facts: false
   roles:
     - maas_grafana
 
-- name: User dashboard (steps 26-27)
+- name: User dashboard
   hosts: localhost
   gather_facts: false
   roles:
     - maas_usage
 
-- name: Public addresses (steps 16-18 and 28)
+- name: Public addresses
   hosts: localhost
   gather_facts: false
   roles:
     - role: maas_routes
       when: maas_routes | default(false) | bool
+
+- name: Smoke test
+  import_playbook: smoke-test.yml
 
 - name: Done
   hosts: localhost

@@ -7,13 +7,15 @@ maas_generated_secrets:
   - maas-sso-admin
   - maas-portal-oidc
   - maas-usage-oidc
+  - maas-reconciler-oidc
+  - maas-kcadm
 
 maas_secret_string_data:
   maas-db:
     POSTGRESQL_USER: maas
     POSTGRESQL_DATABASE: maas
     POSTGRESQL_PASSWORD: "{{ _maas_new['maas-db'] }}"
-    DATABASE_URL: "postgresql://maas:{{ _maas_new['maas-db'] }}@maas-db:5432/maas"
+    DATABASE_URL: "postgresql://maas:{{ _maas_new['maas-db'] }}@maas-db.{{ maas_namespace }}.svc:5432/maas?sslmode=verify-full&sslrootcert=/var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt"
   maas-sso-db:
     POSTGRESQL_USER: keycloak
     POSTGRESQL_DATABASE: keycloak
@@ -25,3 +27,7 @@ maas_secret_string_data:
     client-secret: "{{ _maas_new['maas-portal-oidc'] }}"
   maas-usage-oidc:
     client-secret: "{{ _maas_new['maas-usage-oidc'] }}"
+  maas-reconciler-oidc:
+    client-secret: "{{ _maas_new['maas-reconciler-oidc'] }}"
+  maas-kcadm:
+    client-secret: "{{ _maas_new['maas-kcadm'] }}"

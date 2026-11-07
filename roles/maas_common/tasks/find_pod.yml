@@ -1,20 +1,30 @@
 # Assisted by Claude Opus
-# Sets _maas_pod to one Running pod carrying pod_label, for exec and cp into
-# it. Callers pass pod_label (a Kubernetes label selector) and pod_what (what
-# to call the thing in messages).
-- name: "Find a running {{ pod_what }} pod"
+# Sets _maas_pod to one pod of pod_what that is Ready and not terminating,
+# for exec and cp into it. Callers pass pod_label (a Kubernetes label
+# selector) and pod_what (what to call the thing in messages).
+- name: "Find {{ pod_what }} pods"
   kubernetes.core.k8s_info:
     kind: Pod
     namespace: "{{ maas_namespace }}"
     label_selectors: ["{{ pod_label }}"]
   register: _maas_found_pods
 
-- name: "Pick one {{ pod_what }} pod"
+- name: "Start with no {{ pod_what }} pod"
   ansible.builtin.set_fact:
-    _maas_pod: "{{ _maas_found_pods.resources | selectattr('status.phase', 'equalto', 'Running') | map(attribute='metadata.name') | list | first | default('') }}"
+    _maas_pod: ""
 
-- name: "Check a {{ pod_what }} pod is running"
+- name: "Pick a Ready {{ pod_what }} pod"
+  ansible.builtin.set_fact:
+    _maas_pod: "{{ item.metadata.name }}"
+  loop: "{{ _maas_found_pods.resources | selectattr('status.phase', 'equalto', 'Running') | rejectattr('metadata.deletionTimestamp', 'defined') | sort(attribute='metadata.creationTimestamp', reverse=true) }}"
+  when:
+    - _maas_pod | length == 0
+    - item.status.conditions | default([]) | selectattr('type', 'equalto', 'Ready') | selectattr('status', 'equalto', 'True') | list | length > 0
+  loop_control:
+    label: "{{ item.metadata.name }}"
+
+- name: "Check a {{ pod_what }} pod is Ready"
   ansible.builtin.assert:
     that: _maas_pod | length > 0
-    fail_msg: "no running pod of {{ pod_what }} in {{ maas_namespace }}"
+    fail_msg: "no Ready pod of {{ pod_what }} in {{ maas_namespace }}"
     quiet: true

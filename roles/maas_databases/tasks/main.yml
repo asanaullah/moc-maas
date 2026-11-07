@@ -1,6 +1,6 @@
 # Assisted by Claude Opus
-# Steps 8-9: PostgreSQL for the portals and for Keycloak.
-- name: Apply the databases (steps 8-9)
+# PostgreSQL for the portals and for Keycloak.
+- name: Apply the databases
   ansible.builtin.include_role:
     name: maas_common
     tasks_from: apply

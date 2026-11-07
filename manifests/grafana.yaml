@@ -1,16 +1,16 @@
-# Step 25: the admin dashboard, our own Grafana. No Route, and it listens on its
+# The admin dashboard, our own Grafana. No Route, and it listens on its
 # pod's 127.0.0.1 only, so the only way in is
-#   oc port-forward -n uat-project deploy/maas-grafana 3000:3000
+#   oc port-forward -n {{ maas_namespace }} deploy/maas-grafana 3000:3000
 # then http://localhost:3000/. Viewing is anonymous and read-only; there's no
 # login form and nobody can edit, so no one can add a data source or change a
-# dashboard. Data source and dashboards come from files (steps 24 and this
+# dashboard. Data source and dashboards come from files (the dashboards ConfigMap and this
 # one), and Grafana's own database is an emptyDir: nothing in it needs keeping.
 
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: maas-grafana-provisioning
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   labels:
     app.kubernetes.io/part-of: maas-test
 data:
@@ -21,7 +21,7 @@ data:
         uid: maas-thanos
         type: prometheus
         access: proxy
-        url: http://maas-thanos-query.uat-project.svc.cluster.local:9090
+        url: http://maas-thanos-query.{{ maas_namespace }}.svc.cluster.local:9090
         isDefault: true
         editable: false
         jsonData:
@@ -41,7 +41,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: maas-grafana
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   labels:
     app.kubernetes.io/part-of: maas-test
     app: maas-grafana
@@ -58,10 +58,12 @@ spec:
     spec:
       containers:
         - name: grafana
-          image: docker.io/grafana/grafana:11.6.0
+          image: docker.io/grafana/grafana@sha256:62d2b9d20a19714ebfe48d1bb405086081bc602aa053e28cf6d73c7537640dfb
           env:
             - {name: GF_SERVER_HTTP_ADDR, value: 127.0.0.1}
             - {name: GF_SERVER_HTTP_PORT, value: "3000"}
+            - {name: GF_SERVER_DOMAIN, value: localhost}
+            - {name: GF_SERVER_ENFORCE_DOMAIN, value: "true"}
             - {name: GF_PATHS_DATA, value: /var/lib/grafana}
             - {name: GF_PATHS_PROVISIONING, value: /etc/grafana/provisioning-maas}
             - {name: GF_AUTH_ANONYMOUS_ENABLED, value: "true"}

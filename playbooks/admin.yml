@@ -8,6 +8,8 @@
 #   maas_action=plans
 #   maas_action=plan-set    -e maas_plan=standard -e maas_tokens=20000
 #                           [-e maas_window=60] [-e maas_days=90] [-e maas_models=maas-sim,other]
+#                           [-e maas_priority=0] [-e maas_max_request_tokens=4096] [-e maas_max_requests=600]
+#                           [-e maas_hourly_tokens=<n>, 0 for none]
 #   maas_action=plan-delete -e maas_plan=standard
 #   maas_action=groups                     # which group is mapped to which plan
 #   maas_action=group-map   -e maas_group=maas-standard -e maas_plan=standard
@@ -18,7 +20,13 @@
 #                           [-e maas_secret_name=<name>]   # store the key in that Secret,
 #                                                           # print only its id
 #   maas_action=revoke      -e maas_key_id=<id>
+#   maas_action=revoke-user -e maas_email=<email>              # every key of one owner, and their sessions
+#   maas_action=user-reconcile -e maas_email=<email> -e maas_groups='["group1","group2"]'
+#   maas_action=tui-cleanup                               # delete tui-* plans with no keys left
 #   maas_action=audit
+#
+# Every action records the operator (from a SelfSubjectReview) as the audit
+# trail's actor.
 - name: MaaS admin
   hosts: localhost
   gather_facts: false

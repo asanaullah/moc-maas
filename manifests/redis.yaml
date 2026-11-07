@@ -1,10 +1,10 @@
-# Step 4: Redis for Limitador's counters. No persistence in this stage: a
+# Redis for Limitador's counters. No persistence in this stage: a
 # Limitador restart keeps its counts, a Redis restart does not.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: maas-redis
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   labels:
     app.kubernetes.io/part-of: maas-test
     app: maas-redis
@@ -21,7 +21,7 @@ spec:
     spec:
       containers:
         - name: redis
-          image: docker.io/library/redis:7.4
+          image: docker.io/library/redis@sha256:a7aad82554197a54c653388bfded882a59d6b4a02468484bc31bae6772dcc42c
           args: ["--save", "", "--appendonly", "no"]
           ports:
             - name: redis
@@ -41,7 +41,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: maas-redis
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   labels:
     app.kubernetes.io/part-of: maas-test
 spec:

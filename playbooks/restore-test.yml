@@ -1,0 +1,38 @@
+# Assisted by Claude Opus
+# Restores the latest database dumps into throwaway databases and prints
+# sanity counts next to the live ones, so the backups are known-restorable
+# without touching the live databases. The dumps stay where the backup
+# CronJobs put them (the shared storage volume); only the scratch pods are
+# new, and they are removed afterwards, also when a step fails.
+#
+#   ansible-playbook -i clusters/oac-dev-workload0.yml playbooks/restore-test.yml
+#
+# Run it after any schema change, and regularly (for example monthly).
+- name: Restore test
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../roles/maas_common/defaults/main.yml
+  vars:
+    _maas_restore_image: registry.redhat.io/rhel9/postgresql-16@sha256:9223bb5f0745e66f0e4204ff87d4d1a5283f3726e9b7d9b71d7bdb2a650fc218
+  tasks:
+    - name: Run one scratch restore pod per database
+      ansible.builtin.include_tasks: _restore-one.yml
+      loop:
+        - name: maas-restore-portals
+          live: deploy/maas-db
+          subdir: maas/backups
+          pattern: maas-*.dump
+          user: maas
+          db: maas
+          counts: SELECT 'plans' AS what, count(*) FROM plans UNION ALL SELECT 'group_plans', count(*) FROM group_plans UNION ALL SELECT 'api_keys', count(*) FROM api_keys
+        - name: maas-restore-sso
+          live: deploy/maas-sso-db
+          subdir: maas/sso-backups
+          pattern: maas-sso-*.dump
+          user: keycloak
+          db: keycloak
+          counts: SELECT 'user_entity' AS what, count(*) FROM user_entity UNION ALL SELECT 'keycloak_group', count(*) FROM keycloak_group
+      loop_control:
+        loop_var: _maas_restore
+        label: "{{ _maas_restore.name }}"

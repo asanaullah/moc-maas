@@ -1,5 +1,5 @@
 # Assisted by Claude Opus
-- name: Ensure the generated secrets (step 1)
+- name: Ensure the generated secrets
   when: maas_secrets_generated | default(true) | bool
   block:
     # Each only if it doesn't exist yet, so re-running is safe. To rotate one,
@@ -54,12 +54,52 @@
         msg: "created {{ item }}"
       loop: "{{ _maas_new | default({}) | list }}"
 
+    # Installs from before the database had TLS have a URL with the short host
+    # name (not in the certificate) and no sslmode; give it both. Nothing is printed.
+    - name: Read the portal database URL
+      kubernetes.core.k8s_info:
+        kind: Secret
+        namespace: "{{ maas_namespace }}"
+        name: maas-db
+      register: _maas_db_secret
+      no_log: true
+
+    - name: Give an old portal database URL the full host name and certificate checks
+      kubernetes.core.k8s:
+        state: patched
+        kind: Secret
+        namespace: "{{ maas_namespace }}"
+        name: maas-db
+        definition:
+          data:
+            DATABASE_URL: "{{ _new | b64encode }}"
+      vars:
+        _url: "{{ _maas_db_secret.resources[0].data.DATABASE_URL | b64decode }}"
+        _new: "{{ (_url | regex_replace('@maas-db:5432/', '@maas-db.' ~ maas_namespace ~ '.svc:5432/'))
+                  ~ ('&' if '?' in _url else '?')
+                  ~ 'sslmode=verify-full&sslrootcert=/var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt' }}"
+      when:
+        - _maas_db_secret.resources | length > 0
+        - "'sslmode=' not in (_maas_db_secret.resources[0].data.DATABASE_URL | b64decode)"
+      register: _maas_db_url_fixed
+      no_log: true
+
+    # Deployments don't restart on Secret changes by themselves.
+    - name: Restart the portals onto the new database URL
+      ansible.builtin.command:
+        argv: [oc, rollout, restart, -n, "{{ maas_namespace }}", "deployment/{{ item }}"]
+      loop: [maas-admin, maas-keys, maas-usage]
+      when: _maas_db_url_fixed is changed
+      register: _maas_restart
+      failed_when: _maas_restart.rc != 0 and 'not found' not in _maas_restart.stderr
+      changed_when: _maas_restart.rc == 0
+
     # So the generated values don't sit in facts for the rest of the play.
     - name: Forget the generated values
       ansible.builtin.set_fact:
         _maas_new: {}
 
-# Step 2: the GitHub OAuth App's secret is only created when missing, so a
+# The GitHub OAuth App's secret is only created when missing, so a
 # re-deploy can't overwrite it with stale environment values.
 # github-secret.yml rotates it by setting maas_secrets_github_apply.
 - name: Check the GitHub secret

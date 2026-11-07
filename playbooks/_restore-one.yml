@@ -1,0 +1,116 @@
+# Assisted by Claude Opus
+# One scratch restore: a Postgres pod with emptyDir storage and the backup
+# folder mounted read-only; the newest dump is restored and counted, then the
+# pod is removed. _maas_restore carries name, live (the live database's
+# Deployment), subdir and pattern (where the dumps are), user, db and the
+# sanity query.
+- name: "Remove a leftover {{ _maas_restore.name }}"
+  kubernetes.core.k8s:
+    state: absent
+    namespace: "{{ maas_namespace }}"
+    kind: Pod
+    api_version: v1
+    name: "{{ _maas_restore.name }}"
+    wait: true
+
+- name: "Restore and count in {{ _maas_restore.name }}"
+  block:
+    - name: "Start the scratch pod {{ _maas_restore.name }}"
+      kubernetes.core.k8s:
+        state: present
+        apply: true
+        namespace: "{{ maas_namespace }}"
+        definition:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: "{{ _maas_restore.name }}"
+            labels:
+              app.kubernetes.io/part-of: "{{ maas_part_of }}"
+          spec:
+            restartPolicy: Never
+            activeDeadlineSeconds: 900
+            containers:
+              - name: postgres
+                image: "{{ _maas_restore_image }}"
+                # No command: the image's own entrypoint initialises and starts the server.
+                env:
+                  - {name: POSTGRESQL_USER, value: "{{ _maas_restore.user }}"}
+                  - {name: POSTGRESQL_PASSWORD, value: restore-test}
+                  - {name: POSTGRESQL_DATABASE, value: "{{ _maas_restore.db }}"}
+                  # So pg_restore and psql in `oc exec` connect over TCP as that user.
+                  - {name: PGHOST, value: 127.0.0.1}
+                  - {name: PGPASSWORD, value: restore-test}
+                # 127.0.0.1 on purpose: while initialising, the image runs a
+                # temporary server on its local socket only.
+                readinessProbe:
+                  exec: {command: ["pg_isready", "-h", "127.0.0.1", "-p", "5432"]}
+                  periodSeconds: 3
+                volumeMounts:
+                  - {name: data, mountPath: /var/lib/pgsql/data}
+                  - {name: dumps, mountPath: /backup, subPath: "{{ _maas_restore.subdir }}", readOnly: true}
+            volumes:
+              - {name: data, emptyDir: {}}
+              - {name: dumps, persistentVolumeClaim: {claimName: "{{ maas_storage_claim }}", readOnly: true}}
+
+    - name: "Wait for {{ _maas_restore.name }} to be Ready"
+      ansible.builtin.include_role:
+        name: maas_common
+        tasks_from: wait_pods
+      vars:
+        pods: ["{{ _maas_restore.name }}"]
+
+    # pg_restore exits non-zero if any statement failed, which fails the task.
+    - name: "Restore the newest {{ _maas_restore.pattern }} into {{ _maas_restore.name }}"
+      ansible.builtin.command:
+        argv:
+          - oc
+          - exec
+          - -n
+          - "{{ maas_namespace }}"
+          - "{{ _maas_restore.name }}"
+          - --
+          - bash
+          - -c
+          - set -euo pipefail; f=$(ls -1t /backup/{{ _maas_restore.pattern }} | head -1); echo "restoring $f"; pg_restore -U {{ _maas_restore.user }} -d {{ _maas_restore.db }} --no-owner --no-acl "$f"
+      register: _maas_restored
+      changed_when: true
+
+    - name: "Count rows in {{ _maas_restore.name }}"
+      ansible.builtin.command:
+        argv: [oc, exec, -n, "{{ maas_namespace }}", "{{ _maas_restore.name }}", --,
+               psql, -U, "{{ _maas_restore.user }}", -d, "{{ _maas_restore.db }}", -At, -c, "{{ _maas_restore.counts }}"]
+      register: _maas_counts
+      changed_when: false
+
+    - name: "Count rows in the live database"
+      ansible.builtin.command:
+        argv:
+          - oc
+          - exec
+          - -n
+          - "{{ maas_namespace }}"
+          - "{{ _maas_restore.live }}"
+          - --
+          - bash
+          - -c
+          - PGPASSWORD="$POSTGRESQL_PASSWORD" psql -h 127.0.0.1 -U "$POSTGRESQL_USER" -d "$POSTGRESQL_DATABASE" -At -c "$0"
+          - "{{ _maas_restore.counts }}"
+      register: _maas_live_counts
+      changed_when: false
+      failed_when: false
+
+    - name: "Report {{ _maas_restore.name }}"
+      ansible.builtin.debug:
+        msg:
+          - "{{ _maas_restored.stdout_lines | first | default('') }}"
+          - "restored: {{ _maas_counts.stdout_lines | select | list }}"
+          - "live:     {{ _maas_live_counts.stdout_lines | default([]) | select | list }}"
+  always:
+    - name: "Remove the scratch pod {{ _maas_restore.name }}"
+      kubernetes.core.k8s:
+        state: absent
+        namespace: "{{ maas_namespace }}"
+        kind: Pod
+        api_version: v1
+        name: "{{ _maas_restore.name }}"

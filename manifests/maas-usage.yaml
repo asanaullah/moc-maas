@@ -1,14 +1,14 @@
-# Step 27: the user dashboard, its own pod running portal.py in MODE=usage.
-# Users sign in through Keycloak with the maas-usage client (step 26) and see
+# The user dashboard, its own pod running portal.py in MODE=usage.
+# Users sign in through Keycloak with the maas-usage client and see
 # only their own usage: this window against their budget (live from
 # Limitador), the last 24 hours and the last 30 days (from Thanos Query), and
 # their keys. Every query is built server-side and fixed to the signed-in user.
-# Exposed by step 28.
+# Exposed by its Route (maas-usage-route.yaml).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: maas-usage
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   labels:
     app.kubernetes.io/part-of: maas-test
     app: maas-usage
@@ -39,42 +39,53 @@ spec:
           image: registry.access.redhat.com/ubi9/python-312@sha256:2c7a89f9f1e69f2a00036041ef744b45c8830bebcb2f7194f403ca93729bb0cc
           command: ["sh", "-c"]
           args:
-            - pip install --quiet --no-cache-dir --target /tmp/deps 'psycopg[binary]==3.2.9'
-              && PYTHONPATH=/tmp/deps exec python3 /opt/maas/portal.py
+            - |
+              cat > /tmp/requirements.txt <<'EOF'
+              psycopg==3.2.9 --hash=sha256:01a8dadccdaac2123c916208c96e06631641c0566b22005493f09663c7a8d3b6
+              psycopg-binary==3.2.9 --hash=sha256:76eddaf7fef1d0994e3d536ad48aa75034663d3a07f6f7e3e601105ae73aeff6
+              psycopg-pool==3.3.3 --hash=sha256:9b9cd6a4fcec47a410f7e82d408540e7f77b478509e91b44c1a5457a13e5ff37
+              typing-extensions==4.16.0 --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
+              EOF
+              pip install --quiet --no-cache-dir --no-deps --require-hashes --target /tmp/deps -r /tmp/requirements.txt
+              exec env PYTHONPATH=/tmp/deps python3 /opt/maa/portal.py
           env:
             - name: MODE
               value: usage
             - name: ROUTE_HOST
-              value: maas-usage-uat-project.apps.oac-dev-workload0.hcp.oac.int.massopen.cloud
+              value: maas-usage-{{ maas_namespace }}.{{ maas_apps_domain }}
             - name: OIDC_ISSUER
-              value: https://maas-sso-uat-project.apps.oac-dev-workload0.hcp.oac.int.massopen.cloud/realms/maas
+              value: https://maas-sso-{{ maas_namespace }}.{{ maas_apps_domain }}/realms/maas
             - name: OIDC_BACKCHANNEL
-              value: https://maas-sso.uat-project.svc:8443/realms/maas
+              value: https://maas-sso.{{ maas_namespace }}.svc:8443/realms/maas
             - name: OIDC_CLIENT_ID
               value: maas-usage
             - name: OIDC_CLIENT_SECRET
               valueFrom:
                 secretKeyRef: {name: maas-usage-oidc, key: client-secret}
             - name: THANOS_URL
-              value: http://maas-thanos-query.uat-project.svc.cluster.local:9090
+              value: http://maas-thanos-query.{{ maas_namespace }}.svc.cluster.local:9090
             - name: LIMITADOR_URL
-              value: http://maas-limitador.uat-project.svc.cluster.local:8080
+              value: http://maas-limitador.{{ maas_namespace }}.svc.cluster.local:8080
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef: {name: maas-db, key: DATABASE_URL}
           ports:
             - {name: https, containerPort: 8443}
             - {name: health, containerPort: 8081}
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 10
           readinessProbe:
             httpGet: {path: /healthz, port: 8081}
             periodSeconds: 10
           livenessProbe:
-            httpGet: {path: /healthz, port: 8081}
+            httpGet: {path: /livez, port: 8081}
             initialDelaySeconds: 60
             periodSeconds: 20
             failureThreshold: 3
           volumeMounts:
-            - {name: code, mountPath: /opt/maas}
+            - {name: code, mountPath: /opt/maa/portal.py, subPath: portal.py}
             - {name: tls, mountPath: /etc/tls, readOnly: true}
           resources:
             requests: {cpu: 50m, memory: 128Mi}
@@ -85,13 +96,13 @@ spec:
         - name: tls
           secret: {secretName: maas-usage-tls}
 ---
-# The service CA writes a certificate for maas-usage.uat-project.svc into
+# The service CA writes a certificate for maas-usage.{{ maas_namespace }}.svc into
 # maas-usage-tls; the Route re-encrypts to it.
 apiVersion: v1
 kind: Service
 metadata:
   name: maas-usage
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   annotations:
     service.beta.openshift.io/serving-cert-secret-name: maas-usage-tls
   labels:

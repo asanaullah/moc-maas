@@ -1,16 +1,24 @@
-# Step 16: expose the key portal outside the cluster. Kept apart from step 14 so
+# Expose the key portal outside the cluster. Kept apart from maas-portals.yaml so
 # the portals can run without a public endpoint; apply this only once the
 # portal and gateway are ready to face users.
 # The OAuth redirect reference on the maas-keys service account names this
 # Route, so its name has to stay maas-keys. Its generated host,
-# maas-keys-uat-project.apps.<domain>, is the ROUTE_HOST above.
+# maas-keys-{{ maas_namespace }}.apps.<domain>, is the ROUTE_HOST above.
 apiVersion: route.openshift.io/v1
 kind: Route
 metadata:
   name: maas-keys
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   labels:
     app.kubernetes.io/part-of: maas-test
+  annotations:
+    haproxy.router.openshift.io/set-forwarded-headers: replace
+    haproxy.router.openshift.io/hsts_header: max-age=31536000
+    # Per client address: open connections and HTTP request rate (clients
+    # behind one NAT share them).
+    haproxy.router.openshift.io/rate-limit-connections: "true"
+    haproxy.router.openshift.io/rate-limit-connections.concurrent-tcp: "{{ maas_route_concurrent_tcp }}"
+    haproxy.router.openshift.io/rate-limit-connections.rate-http: "{{ maas_route_rate_http }}"
 spec:
   to:
     kind: Service

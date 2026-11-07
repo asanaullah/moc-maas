@@ -1,5 +1,5 @@
-# Step 18: the gateway's public address. Clients call
-#   https://maas-gateway-uat-project.apps.<domain>/v1/chat/completions
+# The gateway's public address. Clients call
+#   https://maas-gateway-{{ maas_namespace }}.apps.<domain>/v1/chat/completions
 # with "Authorization: Bearer <MaaS key>". The router re-encrypts to Envoy's
 # TLS listener. The timeout matches Envoy's 600s route timeout, so long
 # generations aren't cut off at the router's 30s default.
@@ -7,10 +7,17 @@ apiVersion: route.openshift.io/v1
 kind: Route
 metadata:
   name: maas-gateway
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   labels:
     app.kubernetes.io/part-of: maas-test
   annotations:
+    haproxy.router.openshift.io/set-forwarded-headers: replace
+    haproxy.router.openshift.io/hsts_header: max-age=31536000
+    # Per client address: open connections and HTTP request rate (clients
+    # behind one NAT share them).
+    haproxy.router.openshift.io/rate-limit-connections: "true"
+    haproxy.router.openshift.io/rate-limit-connections.concurrent-tcp: "{{ maas_route_concurrent_tcp }}"
+    haproxy.router.openshift.io/rate-limit-connections.rate-http: "{{ maas_route_rate_http }}"
     haproxy.router.openshift.io/timeout: 600s
 spec:
   to:

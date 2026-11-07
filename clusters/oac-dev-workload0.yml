@@ -1,8 +1,12 @@
 # Assisted by Claude Opus
-# The manifests in this repository are written for this cluster and the
-# uat-project namespace; when you adapt them (see the README), keep this file
-# in sync: the playbooks read the namespace and the apps domain from here.
+# The manifests render for this cluster and whichever namespace the playbooks
+# run against — the default below, or any other with
+#   -e maas_namespace=<name>
+# (the README lists what that namespace must already contain). The playbooks
+# read the namespace, the apps domain and the metrics bucket's S3 endpoint
+# from here.
 all:
   vars:
     maas_namespace: uat-project
     maas_apps_domain: apps.oac-dev-workload0.hcp.oac.int.massopen.cloud
+    maas_s3_endpoint: s3.oac-dev-workload0.hcp.oac.int.massopen.cloud

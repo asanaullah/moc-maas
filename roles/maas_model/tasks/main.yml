@@ -1,7 +1,30 @@
 # Assisted by Claude Opus
-# Steps 3-7: the model path. Limitador starts with no limits; the admin
-# portal writes them when it starts (step 14).
-- name: Apply the model path (steps 3-7)
+# The model path. Limitador starts with no limits; the admin
+# portal writes them when it starts. The maas-limits ConfigMap is
+# the portal's to fill, so it is only created here, never applied over.
+- name: Check the limits ConfigMap
+  kubernetes.core.k8s_info:
+    kind: ConfigMap
+    namespace: "{{ maas_namespace }}"
+    name: maas-limits
+  register: _maas_have_limits
+
+- name: Create the limits ConfigMap when missing
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: maas-limits
+        namespace: "{{ maas_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: "{{ maas_part_of }}"
+      data:
+        limits.yaml: "[]"
+  when: _maas_have_limits.resources | length == 0
+
+- name: Apply the model path
   ansible.builtin.include_role:
     name: maas_common
     tasks_from: apply

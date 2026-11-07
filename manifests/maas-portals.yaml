@@ -1,19 +1,19 @@
-# Step 14: the two portals, both running portal.py from the
-# maas-portal-code ConfigMap (steps 12-13).
+# The two portals, both running portal.py from the
+# maas-portal-code ConfigMap.
 #
 # maas-admin: plans, group mappings, service keys, every key and the audit
 #   trail. Listens on the pod's localhost only, so there is no Service or
 #   Route; reach it with
-#   oc port-forward -n uat-project deploy/maas-admin 8081:8080
-# maas-keys: users sign in through the MaaS Keycloak (step 10), brokered to
-#   GitHub, and request and revoke their own keys (exposed by step 16). Port 8081 answers the gateway's key
+#   oc port-forward -n {{ maas_namespace }} deploy/maas-admin 8081:8080
+# maas-keys: users sign in through the MaaS Keycloak, brokered to
+#   GitHub, and request and revoke their own keys (exposed by its Route). Port 8081 answers the gateway's key
 #   checks inside the namespace.
 
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: maas-admin
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   labels:
     app.kubernetes.io/part-of: maas-test
     app: maas-admin
@@ -28,15 +28,22 @@ spec:
         app.kubernetes.io/part-of: maas-test
         app: maas-admin
     spec:
-      # From the uat-harness chart: may rewrite the maas-limits ConfigMap only.
+      # From manifests/prereqs: may rewrite the maas-limits ConfigMap only.
       serviceAccountName: maas-admin
       containers:
         - name: portal
           image: registry.access.redhat.com/ubi9/python-312@sha256:2c7a89f9f1e69f2a00036041ef744b45c8830bebcb2f7194f403ca93729bb0cc
           command: ["sh", "-c"]
           args:
-            - pip install --quiet --no-cache-dir --target /tmp/deps 'psycopg[binary]==3.2.9'
-              && PYTHONPATH=/tmp/deps exec python3 /opt/maas/portal.py
+            - |
+              cat > /tmp/requirements.txt <<'EOF'
+              psycopg==3.2.9 --hash=sha256:01a8dadccdaac2123c916208c96e06631641c0566b22005493f09663c7a8d3b6
+              psycopg-binary==3.2.9 --hash=sha256:76eddaf7fef1d0994e3d536ad48aa75034663d3a07f6f7e3e601105ae73aeff6
+              psycopg-pool==3.3.3 --hash=sha256:9b9cd6a4fcec47a410f7e82d408540e7f77b478509e91b44c1a5457a13e5ff37
+              typing-extensions==4.16.0 --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
+              EOF
+              pip install --quiet --no-cache-dir --no-deps --require-hashes --target /tmp/deps -r /tmp/requirements.txt
+              exec env PYTHONPATH=/tmp/deps python3 /opt/maa/portal.py
           ports:
             # Metrics only (plans, groups, keys); the admin UI stays on 127.0.0.1:8080.
             - name: metrics
@@ -49,19 +56,36 @@ spec:
                 secretKeyRef:
                   name: maas-db
                   key: DATABASE_URL
+            # The background reconciler reads Keycloak's admin API over the
+            # Service, checked against the service CA.
+            - name: OIDC_BACKCHANNEL
+              value: https://maas-sso.{{ maas_namespace }}.svc:8443/realms/maas
+            - name: RECONCILER_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: maas-reconciler-oidc
+                  key: client-secret
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 10
           readinessProbe:
             exec:
               command: ["python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"]
             periodSeconds: 10
           livenessProbe:
             exec:
-              command: ["python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"]
+              command: ["python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/livez', timeout=3)"]
             initialDelaySeconds: 60
             periodSeconds: 20
             failureThreshold: 3
           volumeMounts:
             - name: code
-              mountPath: /opt/maas
+              mountPath: /opt/maa/portal.py
+              subPath: portal.py
+            - name: storage
+              mountPath: /volumes/{{ maas_namespace }}-storage
+              readOnly: true
           resources:
             requests:
               cpu: 50m
@@ -73,12 +97,15 @@ spec:
         - name: code
           configMap:
             name: maas-portal-code
+        - name: storage
+          persistentVolumeClaim:
+            claimName: "{{ maas_namespace }}-storage"
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: maas-keys
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   labels:
     app.kubernetes.io/part-of: maas-test
     app: maas-keys
@@ -93,7 +120,7 @@ spec:
         app.kubernetes.io/part-of: maas-test
         app: maas-keys
     spec:
-      # From the uat-harness chart: the OAuth client, with no Kubernetes rights.
+      # From manifests/prereqs: the OAuth client, with no Kubernetes rights.
       serviceAccountName: maas-keys
       topologySpreadConstraints:
         - maxSkew: 1
@@ -107,19 +134,30 @@ spec:
           image: registry.access.redhat.com/ubi9/python-312@sha256:2c7a89f9f1e69f2a00036041ef744b45c8830bebcb2f7194f403ca93729bb0cc
           command: ["sh", "-c"]
           args:
-            - pip install --quiet --no-cache-dir --target /tmp/deps 'psycopg[binary]==3.2.9'
-              && PYTHONPATH=/tmp/deps exec python3 /opt/maas/portal.py
+            - |
+              cat > /tmp/requirements.txt <<'EOF'
+              psycopg==3.2.9 --hash=sha256:01a8dadccdaac2123c916208c96e06631641c0566b22005493f09663c7a8d3b6
+              psycopg-binary==3.2.9 --hash=sha256:76eddaf7fef1d0994e3d536ad48aa75034663d3a07f6f7e3e601105ae73aeff6
+              psycopg-pool==3.3.3 --hash=sha256:9b9cd6a4fcec47a410f7e82d408540e7f77b478509e91b44c1a5457a13e5ff37
+              typing-extensions==4.16.0 --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
+              EOF
+              pip install --quiet --no-cache-dir --no-deps --require-hashes --target /tmp/deps -r /tmp/requirements.txt
+              exec env PYTHONPATH=/tmp/deps python3 /opt/maa/portal.py
           env:
             - name: MODE
               value: keys
+            # glibc keeps freed buffers in per-thread arenas; two keep resident
+            # memory down after large request bodies.
+            - name: MALLOC_ARENA_MAX
+              value: "2"
             - name: ROUTE_HOST
-              value: maas-keys-uat-project.apps.oac-dev-workload0.hcp.oac.int.massopen.cloud
+              value: maas-keys-{{ maas_namespace }}.{{ maas_apps_domain }}
             - name: OIDC_ISSUER
-              value: https://maas-sso-uat-project.apps.oac-dev-workload0.hcp.oac.int.massopen.cloud/realms/maas
+              value: https://maas-sso-{{ maas_namespace }}.{{ maas_apps_domain }}/realms/maas
             # Token requests go to Keycloak directly over the Service, checked
             # against the service CA, not out through the router.
             - name: OIDC_BACKCHANNEL
-              value: https://maas-sso.uat-project.svc:8443/realms/maas
+              value: https://maas-sso.{{ maas_namespace }}.svc:8443/realms/maas
             - name: OIDC_CLIENT_ID
               value: maas-portal
             - name: OIDC_CLIENT_SECRET
@@ -137,21 +175,30 @@ spec:
               containerPort: 8443
             - name: validate
               containerPort: 8081
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 10
+          # Readiness doesn't check the database: during an outage the key check
+          # keeps serving recently used keys from its cache.
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /livez
               port: 8081
+              scheme: HTTPS
             periodSeconds: 10
           livenessProbe:
             httpGet:
-              path: /healthz
+              path: /livez
               port: 8081
+              scheme: HTTPS
             initialDelaySeconds: 60
             periodSeconds: 20
             failureThreshold: 3
           volumeMounts:
             - name: code
-              mountPath: /opt/maas
+              mountPath: /opt/maa/portal.py
+              subPath: portal.py
             - name: tls
               mountPath: /etc/tls
               readOnly: true
@@ -161,7 +208,7 @@ spec:
               memory: 128Mi
             limits:
               cpu: 500m
-              memory: 256Mi
+              memory: 512Mi
       volumes:
         - name: code
           configMap:
@@ -170,13 +217,13 @@ spec:
           secret:
             secretName: maas-keys-tls
 ---
-# The service CA writes a certificate for maas-keys.uat-project.svc into the
+# The service CA writes a certificate for maas-keys.{{ maas_namespace }}.svc into the
 # maas-keys-tls Secret; the Route re-encrypts to it.
 apiVersion: v1
 kind: Service
 metadata:
   name: maas-keys
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   annotations:
     service.beta.openshift.io/serving-cert-secret-name: maas-keys-tls
   labels:

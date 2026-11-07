@@ -1,0 +1,5 @@
+# Assisted by Claude Opus
+# The COSI classes the bucket claim and its access are created with; these
+# names are cluster-specific (see the cluster inventory's comments).
+maas_bucket_class: fb-bucket
+maas_bucket_access_class: fb-access-rw

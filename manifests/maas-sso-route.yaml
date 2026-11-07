@@ -1,14 +1,22 @@
-# Step 17: the MaaS Keycloak's public address, for users' browsers. It reaches
+# The MaaS Keycloak's public address, for users' browsers. It reaches
 # only the sidecar, which forwards /realms/maas/ and /resources/ to Keycloak.
 # GitHub sends users back here after they authorize:
-#   https://maas-sso-uat-project.apps.<domain>/realms/maas/broker/github/endpoint
+#   https://maas-sso-{{ maas_namespace }}.apps.<domain>/realms/maas/broker/github/endpoint
 apiVersion: route.openshift.io/v1
 kind: Route
 metadata:
   name: maas-sso
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   labels:
     app.kubernetes.io/part-of: maas-test
+  annotations:
+    haproxy.router.openshift.io/set-forwarded-headers: replace
+    haproxy.router.openshift.io/hsts_header: max-age=31536000
+    # Per client address: open connections and HTTP request rate (clients
+    # behind one NAT share them).
+    haproxy.router.openshift.io/rate-limit-connections: "true"
+    haproxy.router.openshift.io/rate-limit-connections.concurrent-tcp: "{{ maas_route_concurrent_tcp }}"
+    haproxy.router.openshift.io/rate-limit-connections.rate-http: "{{ maas_route_rate_http }}"
 spec:
   to:
     kind: Service

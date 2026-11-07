@@ -1,13 +1,173 @@
 # Assisted by Claude Opus
-# Steps 20-22: the Thanos object store, Prometheus scraping the MaaS, and
-# the Thanos query and compact components that make the metrics last.
-- name: Apply the metrics stack (steps 20-22)
+# The FlashBlade bucket for long-term metrics, Prometheus with its Thanos
+# sidecar, and the Thanos Store, Query and Compact components. The bucket's
+# credentials are rendered into Thanos's object-store Secret here; the
+# components mount that.
+# The project's Role grants create and get on COSI resources but not patch
+# or update, so these are created only when missing and then left alone
+# (deleting a BucketClaim deletes the bucket and its history).
+- name: Check the bucket claim
+  kubernetes.core.k8s_info:
+    kind: BucketClaim
+    api_version: objectstorage.k8s.io/v1alpha1
+    namespace: "{{ maas_namespace }}"
+    name: maas-thanos
+  register: _maas_have_claim
+
+- name: Check the bucket access
+  kubernetes.core.k8s_info:
+    kind: BucketAccess
+    api_version: objectstorage.k8s.io/v1alpha1
+    namespace: "{{ maas_namespace }}"
+    name: maas-thanos
+  register: _maas_have_access
+
+- name: Create the bucket claim when missing
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: objectstorage.k8s.io/v1alpha1
+      kind: BucketClaim
+      metadata:
+        name: maas-thanos
+        namespace: "{{ maas_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: "{{ maas_part_of }}"
+      spec:
+        bucketClassName: "{{ maas_bucket_class }}"
+        protocols: ["S3"]
+  when: _maas_have_claim.resources | length == 0
+
+- name: Create the bucket access when missing
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: objectstorage.k8s.io/v1alpha1
+      kind: BucketAccess
+      metadata:
+        name: maas-thanos
+        namespace: "{{ maas_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: "{{ maas_part_of }}"
+      spec:
+        bucketAccessClassName: "{{ maas_bucket_access_class }}"
+        bucketClaimName: maas-thanos
+        credentialsSecretName: maas-thanos-bucket
+        protocol: S3
+        serviceAccountName: default
+  when: _maas_have_access.resources | length == 0
+
+- name: Wait for the bucket to be provisioned
+  kubernetes.core.k8s_info:
+    kind: BucketClaim
+    api_version: objectstorage.k8s.io/v1alpha1
+    namespace: "{{ maas_namespace }}"
+    name: maas-thanos
+  register: _maas_bucket_claim
+  until: _maas_bucket_claim.resources[0].status.bucketReady | default(false)
+  retries: "{{ (maas_rollout_timeout | int / maas_poll_delay | int) | int }}"
+  delay: "{{ maas_poll_delay }}"
+
+- name: Wait for the bucket access to be granted
+  kubernetes.core.k8s_info:
+    kind: BucketAccess
+    api_version: objectstorage.k8s.io/v1alpha1
+    namespace: "{{ maas_namespace }}"
+    name: maas-thanos
+  register: _maas_bucket_access
+  until: _maas_bucket_access.resources[0].status.accessGranted | default(false)
+  retries: "{{ (maas_rollout_timeout | int / maas_poll_delay | int) | int }}"
+  delay: "{{ maas_poll_delay }}"
+
+# The COSI driver writes the credentials as a BucketInfo JSON document in
+# the Secret's single key; Thanos needs them inline in its object-store
+# config. Nothing is printed.
+- name: Read the bucket credentials
+  kubernetes.core.k8s_info:
+    kind: Secret
+    namespace: "{{ maas_namespace }}"
+    name: maas-thanos-bucket
+  register: _maas_bucket_secret
+  no_log: true
+
+# A Secret, not a ConfigMap: the keys allow writing the bucket. Server-side
+# apply keeps no last-applied annotation with the keys in it.
+- name: Render Thanos's object-store config
+  kubernetes.core.k8s:
+    state: present
+    server_side_apply:
+      field_manager: maas-admin
+    namespace: "{{ maas_namespace }}"
+    definition:
+      apiVersion: v1
+      kind: Secret
+      type: Opaque
+      metadata:
+        name: maas-thanos-objstore
+        labels:
+          app.kubernetes.io/part-of: "{{ maas_part_of }}"
+      data:
+        objstore.yml: "{{ _maas_objstore | b64encode }}"
+  vars:
+    _maas_info: "{{ _maas_bucket_secret.resources[0].data.BucketInfo | b64decode | from_json }}"
+    _maas_s3: "{{ _maas_info.spec.secretS3 }}"
+    _maas_objstore: |
+      type: S3
+      config:
+        bucket: {{ _maas_bucket_claim.resources[0].status.bucketName }}
+        endpoint: {{ maas_s3_endpoint }}
+        access_key: {{ _maas_s3.accessKeyID }}
+        secret_key: {{ _maas_s3.accessSecretKey }}
+  no_log: true
+
+- name: Remove the old object-store ConfigMap, which held the keys
+  kubernetes.core.k8s:
+    state: absent
+    kind: ConfigMap
+    api_version: v1
+    namespace: "{{ maas_namespace }}"
+    name: maas-thanos-objstore
+
+# The S3 endpoint's certificate is signed by the cluster's ingress CA; the
+# Thanos images trust only the system bundle, so the CA is mounted into the
+# metrics pods with SSL_CERT_FILE. The inventory's maas_s3_ca wins when set.
+- name: Read the cluster's ingress CA
+  kubernetes.core.k8s_info:
+    kind: ConfigMap
+    namespace: openshift-config-managed
+    name: default-ingress-cert
+  register: _maas_ingress_ca
+  failed_when: false
+  when: maas_s3_ca is not defined
+
+- name: Check that a CA for the S3 endpoint is known
+  ansible.builtin.assert:
+    that: maas_s3_ca is defined or (_maas_ingress_ca.resources | default([]) | length > 0)
+    fail_msg: >-
+      Can't read openshift-config-managed/default-ingress-cert; set maas_s3_ca
+      in the inventory to the PEM of the CA that signs {{ maas_s3_endpoint }}.
+
+- name: Write the S3 endpoint's CA
+  kubernetes.core.k8s:
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: maas-s3-ca
+        namespace: "{{ maas_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: "{{ maas_part_of }}"
+      data:
+        s3-ca.crt: "{{ maas_s3_ca if maas_s3_ca is defined else _maas_ingress_ca.resources[0].data['ca-bundle.crt'] }}"
+
+- name: Apply the metrics stack
   ansible.builtin.include_role:
     name: maas_common
     tasks_from: apply
   vars:
     manifests:
-      - metrics-store.yaml
       - prometheus.yaml
       - thanos.yaml
 

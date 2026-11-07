@@ -3,7 +3,8 @@
 # the key in MOC_MAAS_KEY, and prints the response and the HTTP status.
 #
 #   MOC_MAAS_KEY=... ansible-playbook -i clusters/oac-dev-workload0.yml playbooks/test-gateway.yml \
-#     [-e maas_model=maas-sim] [-e maas_prompt=hi]
+#     [-e maas_model=maas-sim] [-e maas_prompt=hi] [-e maas_max_tokens=16] \
+#     [-e maas_stream=true] [-e maas_include_usage=true]
 #
 # 200 = served, 401 = bad, expired or revoked key, 403 = model not in your
 # plan, 429 = token budget used up for this window.
@@ -17,6 +18,9 @@
   vars:
     maas_model: maas-sim
     maas_prompt: hi
+    maas_max_tokens: 16
+    maas_stream: false
+    maas_include_usage: false
   tasks:
     - name: Check the key
       ansible.builtin.assert:
@@ -34,12 +38,11 @@
         method: POST
         headers:
           Authorization: "Bearer {{ lookup('ansible.builtin.env', 'MOC_MAAS_KEY') }}"
-        body:
-          model: "{{ maas_model }}"
-          max_tokens: 16
-          messages:
-            - role: user
-              content: "{{ maas_prompt }}"
+        body: "{{ {'model': maas_model, 'max_tokens': maas_max_tokens | int,
+                   'messages': [{'role': 'user', 'content': maas_prompt}],
+                   'stream': maas_stream | bool}
+                  | combine({'stream_options': {'include_usage': maas_include_usage | bool}}
+                            if maas_stream | bool else {}) }}"
         body_format: json
         status_code: [200, 401, 403, 429]
         validate_certs: false

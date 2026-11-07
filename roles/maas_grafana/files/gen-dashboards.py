@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Steps 23-24: renders the admin Grafana's two dashboards as a ConfigMap
+"""Renders the admin Grafana's two dashboards as a ConfigMap
 Grafana provisions from at startup, to stdout; deploy.yml applies it:
 
   MaaS usage    tokens, requests and 429s per person and per application
@@ -63,7 +63,7 @@ usage = dashboard("maas-usage", "MaaS usage", [
           transformations=[{"id": "organize", "options": {"excludeByName": {"Time": True},
                                                            "renameByName": {"user": "owner", "Value": "tokens"}}}]),
     panel("table", "Keys", [("maas_key_info", "")], 12, 19, 12, 9, None,
-          "Every key, with its owner, kind (user or service), plan in force and status.",
+          "Every active key, with its owner, kind (user or service) and plan in force.",
           transformations=[{"id": "organize", "options": {"excludeByName": {
               "Time": True, "Value": True, "__name__": True, "instance": True, "job": True, "cluster": True,
               "namespace": True, "prometheus": True, "key_id": True}}}]),
@@ -72,18 +72,19 @@ usage = dashboard("maas-usage", "MaaS usage", [
               "Time": True, "__name__": True, "instance": True, "job": True, "cluster": True, "namespace": True,
               "prometheus": True}, "renameByName": {"Value": "tokens per window"}}}]),
     panel("timeseries", "Key checks by result", [("sum by (result) (rate(maas_key_checks_total[5m])) * 60", "{{result}}")],
-          12, 28, 12, 6, "short", "ok, invalid (bad, expired or revoked key), missing (no key), model_denied (model not in plan)."),
+          12, 28, 12, 6, "short", "ok, invalid (bad, expired or revoked key), missing (no key), model_denied (model not in plan), "
+          "plan_inactive (Limitador hasn't loaded the plan), limits_unknown (Limitador unreachable)."),
 ], "Usage per person and per application, against their plans' budgets.")
 
 _id[0] = 0
 serving = dashboard("maas-serving", "MaaS serving", [
     panel("stat", "Replicas ready in the pool", [("max(llm_d_epp_ready_endpoints)", "")], 0, 0, 6, 4, "short"),
-    panel("stat", "Requests per second", [('sum(rate(envoy_http_downstream_rq_total{envoy_http_conn_manager_prefix="maas"}[5m]))', "")],
+    panel("stat", "Requests per second", [('sum(rate(envoy_http_downstream_rq_total{envoy_http_conn_manager_prefix=~"maas|maas-tls"}[5m]))', "")],
           6, 0, 6, 4, "reqps"),
     panel("stat", "Median time to first token", [("histogram_quantile(0.5, sum by (le) (rate(llm_d_epp_request_ttft_seconds_bucket[5m])))", "")],
           12, 0, 6, 4, "s"),
-    panel("stat", "Gateway 5xx share", [('sum(rate(envoy_http_downstream_rq_xx{envoy_http_conn_manager_prefix="maas",envoy_response_code_class="5"}[5m])) '
-                                         '/ sum(rate(envoy_http_downstream_rq_total{envoy_http_conn_manager_prefix="maas"}[5m]))', "")],
+    panel("stat", "Gateway 5xx share", [('sum(rate(envoy_http_downstream_rq_xx{envoy_http_conn_manager_prefix=~"maas|maas-tls",envoy_response_code_class="5"}[5m])) '
+                                         '/ sum(rate(envoy_http_downstream_rq_total{envoy_http_conn_manager_prefix=~"maas|maas-tls"}[5m]))', "")],
           18, 0, 6, 4, "percentunit"),
     panel("timeseries", "Requests per replica (load balancing)",
           [("sum by (endpoint_name) (rate(llm_d_epp_scheduler_attempts_total[5m]))", "{{endpoint_name}}")], 0, 4, 12, 8, "reqps",
@@ -103,18 +104,46 @@ serving = dashboard("maas-serving", "MaaS serving", [
           [("histogram_quantile(0.5, sum by (le) (rate(llm_d_epp_prefix_indexer_hit_ratio_bucket[5m])))", "hit ratio")],
           12, 20, 12, 8, "percentunit", "How much of each prompt the chosen replica already had cached; chat traffic sticks to one replica for this."),
     panel("timeseries", "Gateway responses by status class",
-          [('sum by (envoy_response_code_class) (rate(envoy_http_downstream_rq_xx{envoy_http_conn_manager_prefix="maas"}[5m]))',
+          [('sum by (envoy_response_code_class) (rate(envoy_http_downstream_rq_xx{envoy_http_conn_manager_prefix=~"maas|maas-tls"}[5m]))',
             "{{envoy_response_code_class}}xx")], 0, 28, 12, 7, "reqps"),
+    panel("timeseries", "Key-check connection failures",
+          [('rate(envoy_cluster_upstream_cx_connect_fail{envoy_cluster_name="maas_keys"}[5m])', "connect failures")],
+          0, 35, 12, 6, "reqps", "Should stay at zero; a rising line means the key checker is refusing connections."),
+    panel("timeseries", "Picker refusals by flow-control result",
+          [('sum by (result) (rate(llm_d_epp_flow_control_requests_total[5m])) * 60', "{{result}}")],
+          12, 35, 12, 6, "reqps", "Capacity refusals from the pool, distinct from budget refusals (429s the token budget causes)."),
     panel("timeseries", "Pool balance (standard deviation across replicas)",
           [("max(llm_d_epp_std_dev_queue_size)", "queue"), ("max(llm_d_epp_std_dev_running_requests)", "running")],
           12, 28, 12, 7, "short", "Zero means perfectly even load."),
+    # Health: the conditions worth an alert, visible without one.
+    {"id": 100, "type": "row", "title": "Health", "collapsed": False, "gridPos": {"x": 0, "y": 41, "w": 24, "h": 1},
+     "panels": []},
+    panel("stat", "Since the last reconciler pass", [("time() - max(maas_reconcile_last_success_timestamp_seconds)", "")],
+          0, 42, 6, 4, "s", "Should stay under 30 minutes; the reconciler runs every 10."),
+    panel("stat", "Plans without a loaded limit", [("count(maas_plan_limit_loaded == 0) or vector(0)", "")],
+          6, 42, 6, 4, "short", "A plan Limitador hasn't loaded refuses every request (403 plan not active yet)."),
+    panel("stat", "Storage volume free", [("min(maas_volume_free_bytes / maas_volume_size_bytes)", "")],
+          12, 42, 6, 4, "percentunit", "Below 15% needs attention: the databases and backups share this volume."),
+    panel("stat", "Portal database connections", [("max(maas_db_connections / maas_db_max_connections)", "")],
+          18, 42, 6, 4, "percentunit", "Share of max_connections in use; above 80% needs attention."),
+    panel("timeseries", "Gateway rate cap refusals", [
+        ('sum(rate(envoy_http_local_rate_limit_rate_limited{envoy_local_http_ratelimit_prefix="maas_local_rate_limit"}[5m]))'
+         ' or sum(rate(envoy_maas_local_rate_limit_http_local_rate_limit_rate_limited[5m]))', "refused")],
+          0, 46, 12, 6, "reqps", "Requests over a gateway pod's own rate cap (429 x-maas-refusal: gateway-busy)."),
+    panel("stat", "Reconciler refusals", [("max(maas_reconcile_refused_users)", "")],
+          12, 46, 12, 6, "short", "Non-zero: the last pass found most users gone in Keycloak and revoked nothing; check Keycloak."),
+    panel("table", "Firing alerts", [('ALERTS{alertstate="firing"}', "")], 0, 52, 24, 8, None,
+          "Alerts the MaaS Prometheus evaluates (manifests/prometheus.yaml, alerts.yml).",
+          transformations=[{"id": "organize", "options": {"excludeByName": {
+              "Time": True, "Value": True, "__name__": True, "alertstate": True, "cluster": True,
+              "prometheus": True}}}]),
 ], "Replicas, how the picker spreads load across them, and latency.")
 
 body = "".join(
     f"  {name}.json: |\n" + "".join(f"    {line}\n" for line in json.dumps(d, indent=1).splitlines())
     for name, d in (("maas-usage", usage), ("maas-serving", serving)))
 print(
-    "# Step 24: the admin Grafana's dashboards. Generated by gen-dashboards.py at\n"
+    "# The admin Grafana's dashboards. Generated by gen-dashboards.py at\n"
     "# deploy time; edit that rather than editing this by hand.\n"
     "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: maas-grafana-dashboards\n  namespace: "
     + NS + "\n"

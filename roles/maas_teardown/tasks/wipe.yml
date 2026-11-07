@@ -5,6 +5,18 @@
 # metrics stay. Runs after the workloads are gone, from a short-lived pod that
 # mounts the volume; nothing else is mounted then, so no database is wiped
 # underneath a running pod.
+# Running or starting ones only: a finished backup pod no longer touches the data.
+- name: Wait for the database pods to be gone
+  kubernetes.core.k8s_info:
+    kind: Pod
+    namespace: "{{ maas_namespace }}"
+    label_selectors: ["app in (maas-db, maas-sso-db, maas-db-backup, maas-sso-db-backup)"]
+    field_selectors: ["status.phase!=Succeeded", "status.phase!=Failed"]
+  register: _maas_db_pods
+  until: _maas_db_pods.resources | length == 0
+  retries: "{{ (maas_rollout_timeout | int / maas_poll_delay | int) | int }}"
+  delay: "{{ maas_poll_delay }}"
+
 - name: Run the wipe pod
   kubernetes.core.k8s:
     state: present

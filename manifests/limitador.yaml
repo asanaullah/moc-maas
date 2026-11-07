@@ -1,24 +1,14 @@
-# Step 5: Limitador, the token counter. The gateway sends each request's user
+# Limitador, the token counter. The gateway sends each request's user
 # and plan as descriptors; each plan's limit keeps one counter per user.
 # The admin portal owns the limits: it writes one per plan at startup and on
-# every plan change. Until then there are none, so start the admin portal
-# before sending traffic.
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: maas-limits
-  namespace: uat-project
-  labels:
-    app.kubernetes.io/part-of: maas-test
-data:
-  limits.yaml: |
-    []
----
+# every plan change, so the maas-limits ConfigMap is created empty by the
+# playbook and never applied over again. Until the portal writes the limits
+# there are none, so start the admin portal before sending traffic.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: maas-limitador
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   labels:
     app.kubernetes.io/part-of: maas-test
     app: maas-limitador
@@ -33,9 +23,10 @@ spec:
         app.kubernetes.io/part-of: maas-test
         app: maas-limitador
     spec:
+      shareProcessNamespace: true
       containers:
         - name: limitador
-          image: quay.io/kuadrant/limitador:v2.5.0
+          image: quay.io/kuadrant/limitador@sha256:67011e2ce560e97e2b13dcb8bb23becb3c5f365180cbe4277100216451725ae6
           # The image's entrypoint is limitador-server.
           args:
             # Every descriptor entry (user, plan) becomes a label on Limitador's
@@ -72,7 +63,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: maas-limitador
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   labels:
     app.kubernetes.io/part-of: maas-test
 spec:

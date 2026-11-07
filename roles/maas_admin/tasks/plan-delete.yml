@@ -3,7 +3,7 @@
   ansible.builtin.assert:
     that:
       - maas_plan is defined
-      - maas_plan is match('^[A-Za-z0-9._-]+$')
+      - maas_plan is match('^[a-z0-9][a-z0-9._-]{0,62}$')
     fail_msg: set maas_plan to the plan's name
     quiet: true
 
@@ -11,7 +11,7 @@
   kubernetes.core.k8s_exec:
     namespace: "{{ maas_namespace }}"
     pod: "{{ _maas_pod }}"
-    command: "python3 /tmp/maas-api.py POST /api/plans/delete '{{ {'name': maas_plan} | to_json }}'"
+    command: "python3 /tmp/maas-api.py POST /api/plans/delete '{{ {'name': maas_plan} | to_json }}' {{ _maas_actor_b64 }}"
   register: _maas_api
 
 - name: Report

@@ -16,8 +16,24 @@ maas_gateway_host: "maas-gateway-{{ maas_namespace }}.{{ maas_apps_domain }}"
 maas_usage_host: "maas-usage-{{ maas_namespace }}.{{ maas_apps_domain }}"
 maas_gateway_url: "https://{{ maas_gateway_host }}/v1/chat/completions"
 
-# The shared volume the databases (and backups and metrics) live on, and the
-# image the teardown's wipe step runs from — pinned to the portals' image so
-# nothing new gets pulled for it.
-maas_storage_claim: uat-project-storage
+# The shared volume the databases (and backups and metrics) live on, named
+# after the namespace, and the image the teardown's wipe step runs from —
+# pinned to the portals' image so nothing new gets pulled for it.
+maas_storage_claim: "{{ maas_namespace }}-storage"
 maas_wipe_image: registry.access.redhat.com/ubi9/python-312@sha256:2c7a89f9f1e69f2a00036041ef744b45c8830bebcb2f7194f403ca93729bb0cc
+
+# Router limits per client address on every public Route: open connections,
+# and HTTP requests over HAProxy's short counting window. Size them from the
+# expected traffic.
+maas_route_concurrent_tcp: 50
+maas_route_rate_http: 100
+
+# How long a stopping gateway pod keeps serving before Envoy gets SIGTERM:
+# longer than the longest generation you serve, so rollouts and drains don't
+# cut them. Check it against the gateway's access log:
+#   oc logs -n <ns> -l app=maas-gateway --since=24h | grep -oE '"duration_ms":"?[0-9]+' | grep -oE '[0-9]+$' | sort -n | tail -1
+maas_gateway_drain_seconds: 120
+# The gateway's own request-rate cap per pod, in front of the key check:
+# requests per second, and the burst it allows.
+maas_gateway_rate_per_second: 200
+maas_gateway_rate_burst: 400

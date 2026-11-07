@@ -3,12 +3,15 @@
 # the portal's own pod (it has no Service; it listens on the pod's localhost
 # only). The command is maas_action; each action file checks its own
 # arguments.
+# The action is maas_action on the command line; another role that includes
+# this one while maas_action is already pinned (an extra var always wins)
+# passes maas_admin_action instead.
 - name: Check the action
   ansible.builtin.assert:
     that:
-      - maas_action is defined
-      - maas_action in ['plans', 'plan-set', 'plan-delete', 'groups', 'group-map', 'group-unmap', 'limits', 'keys', 'service-key', 'revoke', 'audit']
-    fail_msg: set maas_action to one of plans, plan-set, plan-delete, groups, group-map, group-unmap, limits, keys, service-key, revoke, audit
+      - maas_admin_action | default(maas_action) is defined
+      - maas_admin_action | default(maas_action) in ['plans', 'plan-set', 'plan-delete', 'groups', 'group-map', 'group-unmap', 'limits', 'keys', 'service-key', 'revoke', 'revoke-user', 'user-reconcile', 'tui-cleanup', 'audit', 'api']
+    fail_msg: set maas_action to one of plans, plan-set, plan-delete, groups, group-map, group-unmap, limits, keys, service-key, revoke, revoke-user, user-reconcile, tui-cleanup, audit, api
     quiet: true
 
 - name: Find a running admin portal pod
@@ -32,5 +35,17 @@
     pod: "{{ _maas_pod }}"
     command: "bash -c 'echo {{ _maas_api_b64 }} | base64 -d > /tmp/maas-api.py'"
 
-- name: "Run {{ maas_action }}"
-  ansible.builtin.include_tasks: "{{ maas_action }}.yml"
+- name: Who is running this
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: authentication.k8s.io/v1
+      kind: SelfSubjectReview
+  register: _maas_ssr
+
+- name: Remember the operator for the audit trail
+  ansible.builtin.set_fact:
+    _maas_actor_b64: "{{ (_maas_ssr.result.status.userInfo.username | default('')) | b64encode }}"
+
+- name: "Run {{ maas_admin_action | default(maas_action) }}"
+  ansible.builtin.include_tasks: "{{ maas_admin_action | default(maas_action) }}.yml"

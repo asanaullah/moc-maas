@@ -1,21 +1,21 @@
-# Step 10: the MaaS's own identity provider: Red Hat build of Keycloak, realm
+# The MaaS's own identity provider: Red Hat build of Keycloak, realm
 # "maas", where users sign in with GitHub. Namespace members manage users and
 # groups in Keycloak's admin console and map groups to plans in the MaaS admin
 # portal.
 #
-# Needs these Secrets in uat-project:
-#   maas-sso-db, maas-sso-admin, maas-portal-oidc, maas-usage-oidc  (step 1, deploy.yml)
-#   maas-sso-github                                 (step 2, deploy.yml or github-secret.yml)
+# Needs these Secrets in {{ maas_namespace }}:
+#   maas-sso-db, maas-sso-admin, maas-portal-oidc, maas-usage-oidc  (deploy.yml)
+#   maas-sso-github                                 (deploy.yml or github-secret.yml)
 #
 # Keycloak's admin console is never exposed: an Envoy sidecar in each pod is
 # the only thing the Route reaches, and it forwards /realms/maas/ and
 # /resources/ only. Reach the admin console with
-#   oc port-forward -n uat-project deploy/maas-sso 9443:8443
+#   oc port-forward -n {{ maas_namespace }} deploy/maas-sso 9443:8443
 # then https://localhost:9443/admin/ (the certificate is for the Service name,
 # so the browser warns), as the user in maas-sso-admin.
 #
 # After the first start, deploy.yml points the admin console's login at
-# the port-forward too (step 11); the public address blocks the master
+# the port-forward too; the public address blocks the master
 # realm.
 
 # Realm "maas", imported on Keycloak's first start only; later changes are made
@@ -25,7 +25,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: maas-sso-realm
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   labels:
     app.kubernetes.io/part-of: maas-test
 data:
@@ -85,11 +85,11 @@ data:
           "consentRequired": false,
           "fullScopeAllowed": false,
           "frontchannelLogout": false,
-          "redirectUris": ["https://maas-keys-uat-project.apps.oac-dev-workload0.hcp.oac.int.massopen.cloud/callback"],
+          "redirectUris": ["https://maas-keys-{{ maas_namespace }}.{{ maas_apps_domain }}/callback"],
           "webOrigins": [],
           "attributes": {
             "pkce.code.challenge.method": "S256",
-            "post.logout.redirect.uris": "https://maas-keys-uat-project.apps.oac-dev-workload0.hcp.oac.int.massopen.cloud/"
+            "post.logout.redirect.uris": "https://maas-keys-{{ maas_namespace }}.{{ maas_apps_domain }}/"
           },
           "protocolMappers": [
             {
@@ -116,7 +116,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: maas-sso-proxy
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   labels:
     app.kubernetes.io/part-of: maas-test
 data:
@@ -140,9 +140,10 @@ data:
                   typed_config:
                     "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
                     stat_prefix: public
-                    # The router is the client; keep its X-Forwarded-For and
-                    # append its address, so Keycloak's brute-force protection
-                    # sees the user's address.
+                    # The router replaces any client-supplied X-Forwarded-For
+                    # with the user's address; with use_remote_address false
+                    # the sidecar passes it on unchanged, so Keycloak's
+                    # brute-force protection sees the user's address.
                     use_remote_address: false
                     xff_num_trusted_hops: 1
                     normalize_path: true
@@ -181,20 +182,20 @@ data:
             name: envoy.transport_sockets.tls
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
-              sni: maas-sso.uat-project.svc
+              sni: maas-sso.{{ maas_namespace }}.svc
               common_tls_context:
                 validation_context:
                   trusted_ca:
                     filename: /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt
                   match_typed_subject_alt_names:
                     - san_type: DNS
-                      matcher: {exact: maas-sso.uat-project.svc}
+                      matcher: {exact: maas-sso.{{ maas_namespace }}.svc}
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: maas-sso
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   labels:
     app.kubernetes.io/part-of: maas-test
     app: maas-sso
@@ -225,7 +226,7 @@ spec:
             # Public address for browsers; backchannel calls (the key portal's
             # token requests) may use the Service name instead.
             - name: KC_HOSTNAME
-              value: https://maas-sso-uat-project.apps.oac-dev-workload0.hcp.oac.int.massopen.cloud
+              value: https://maas-sso-{{ maas_namespace }}.{{ maas_apps_domain }}
             - name: KC_HOSTNAME_BACKCHANNEL_DYNAMIC
               value: "true"
             - name: KC_HOSTNAME_ADMIN
@@ -247,17 +248,16 @@ spec:
               value: "true"
             - name: KC_DB
               value: postgres
-            - name: KC_DB_URL_HOST
-              value: maas-sso-db
-            - name: KC_DB_URL_DATABASE
-              valueFrom:
-                secretKeyRef: {name: maas-sso-db, key: POSTGRESQL_DATABASE}
+            - name: KC_DB_URL
+              value: "jdbc:postgresql://maas-sso-db.{{ maas_namespace }}.svc:5432/keycloak?sslmode=verify-full&sslrootcert=/var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt"
             - name: KC_DB_USERNAME
               valueFrom:
                 secretKeyRef: {name: maas-sso-db, key: POSTGRESQL_USER}
             - name: KC_DB_PASSWORD
               valueFrom:
                 secretKeyRef: {name: maas-sso-db, key: POSTGRESQL_PASSWORD}
+            - name: KC_DB_POOL_MAX_SIZE
+              value: "30"
             - name: KC_BOOTSTRAP_ADMIN_USERNAME
               valueFrom:
                 secretKeyRef: {name: maas-sso-admin, key: KC_BOOTSTRAP_ADMIN_USERNAME}
@@ -274,11 +274,20 @@ spec:
             - name: PORTAL_CLIENT_SECRET
               valueFrom:
                 secretKeyRef: {name: maas-portal-oidc, key: client-secret}
-            # Read by deploy.yml's usage-client step (step 26), so the user
+            # Read by deploy.yml's usage-client step, so the user
             # dashboard's client secret never leaves the cluster.
             - name: USAGE_CLIENT_SECRET
               valueFrom:
                 secretKeyRef: {name: maas-usage-oidc, key: client-secret}
+            # Read by kcadm.sh's sync step: the admin portal's background
+            # reconciler signs in as this client's service account.
+            - name: RECONCILER_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef: {name: maas-reconciler-oidc, key: client-secret}
+            # kcadm.sh signs in as the maas-kcadm client with this; sync creates it.
+            - name: KCADM_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef: {name: maas-kcadm, key: client-secret, optional: true}
           ports:
             - name: https
               containerPort: 8443
@@ -312,7 +321,7 @@ spec:
               cpu: "2"
               memory: 1536Mi
         - name: proxy
-          image: docker.io/envoyproxy/envoy:v1.35.12
+          image: docker.io/envoyproxy/envoy@sha256:45876da26cbb8ef73ef86e985586f363a619eef9c0081a9c3a781cb4b3b9255e
           command: ["envoy"]
           args: ["-c", "/etc/envoy/envoy.yaml", "--log-level", "warn", "--concurrency", "2"]
           ports:
@@ -344,14 +353,14 @@ spec:
           configMap:
             name: maas-sso-proxy
 ---
-# The service CA writes a certificate for maas-sso.uat-project.svc into the
+# The service CA writes a certificate for maas-sso.{{ maas_namespace }}.svc into the
 # maas-sso-tls Secret. The Route goes to "public" (the sidecar); the key portal
 # talks to Keycloak directly on "https" for its token requests.
 apiVersion: v1
 kind: Service
 metadata:
   name: maas-sso
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   annotations:
     service.beta.openshift.io/serving-cert-secret-name: maas-sso-tls
   labels:

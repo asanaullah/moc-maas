@@ -1,0 +1,50 @@
+# Assisted by Claude Opus
+# What project members (the MaaS admins) need in the namespace. A cluster
+# admin applies this directory once, in the namespace:
+#   oc apply -n <namespace> -f manifests/prereqs/
+# and binds this Role to the project's members group (see the README).
+# deploy.yml doesn't apply it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: maas-project-admin
+  labels:
+    app.kubernetes.io/part-of: maas-prereqs
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  # The playbooks run the Keycloak and admin-portal commands inside their pods;
+  # admins reach the admin portal, the Keycloak console and Grafana by port-forward.
+  - apiGroups: [""]
+    resources: ["pods/exec", "pods/portforward"]
+    verbs: ["create", "get"]
+  - apiGroups: [""]
+    resources: ["services", "configmaps", "secrets"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: ["route.openshift.io"]
+    resources: ["routes"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: ["inference.networking.k8s.io"]
+    resources: ["inferencepools"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  # The metrics bucket. Create and get only: deleting a BucketClaim deletes
+  # the bucket and its history.
+  - apiGroups: ["objectstorage.k8s.io"]
+    resources: ["bucketclaims", "bucketaccesses"]
+    verbs: ["create", "get"]

@@ -1,8 +1,24 @@
 # Assisted by Claude Opus
-# Restarts each deployment so pods pick up ConfigMap content they only read
-# at startup: a restartedAt annotation triggers a new roll. Follow with
-# wait_deployments; the annotation merges, the rest of the spec is untouched.
-- name: Restart the deployments
+# Rolls each deployment when the ConfigMaps it reads only at start have new
+# content: their contents are hashed onto the pod template, so a change rolls
+# the pods and an unchanged deploy rolls nothing. Callers pass deployments and
+# the configmaps they read.
+- name: Read the ConfigMaps the deployments read
+  kubernetes.core.k8s_info:
+    kind: ConfigMap
+    namespace: "{{ maas_namespace }}"
+    name: "{{ item }}"
+  loop: "{{ configmaps | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  register: _maas_roll_cms
+
+- name: Hash their contents
+  ansible.builtin.set_fact:
+    _maas_config_hash: "{{ (_maas_roll_cms.results | map(attribute='resources') | flatten
+                            | selectattr('data', 'defined') | map(attribute='data') | list | to_json) | hash('sha256') }}"
+
+- name: Stamp the hash on the pod templates
   kubernetes.core.k8s:
     state: present
     definition:
@@ -15,5 +31,7 @@
         template:
           metadata:
             annotations:
-              kubectl.kubernetes.io/restartedAt: "{{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}"
+              maas-config-hash: "{{ _maas_config_hash }}"
   loop: "{{ deployments }}"
+  loop_control:
+    label: "{{ item }}"

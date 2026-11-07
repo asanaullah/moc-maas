@@ -1,17 +1,17 @@
-# Step 15: the gateway. Envoy with two filters, in order:
-#   1. Kuadrant's wasm-shim: rejects requests without a user label, checks the
-#      user's token budget with Limitador, and reports the tokens each
-#      response used.
-#   2. ext_proc to the endpoint picker, which chooses the emulator pod.
-# Before those, the gateway removes any x-maas-* headers the client sent and
-# checks the client's API key with the key portal (ext_authz), which returns
-# the caller's user, plan and allowed models. The key itself is not forwarded
-# to the model.
+# The gateway. Envoy's HTTP filters, in order:
+#   1. a per-pod request-rate cap, in front of the key check;
+#   2. removal of any x-maas-* and endpoint-picker control headers the client sent;
+#   3. two key checks with the key portal (ext_authz): headers only, then with
+#      the body, which return the caller's user, plan and allowed models;
+#   4. Kuadrant's wasm-shim: checks the user's token budget (and request count)
+#      with Limitador, and reports the tokens each response used;
+#   5. ext_proc to the endpoint picker, which chooses the model pod.
+# The key and the identity headers are not forwarded to the model.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: maas-envoy-config
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   labels:
     app.kubernetes.io/part-of: maas-test
 data:
@@ -22,6 +22,27 @@ data:
           address: 127.0.0.1
           port_value: 19000
 
+    # A backstop for the gateway's own memory: each body check buffers up to
+    # 4 MiB, and the pod has 512 MiB.
+    overload_manager:
+      refresh_interval: 0.25s
+      resource_monitors:
+        - name: envoy.resource_monitors.fixed_heap
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.resource_monitors.fixed_heap.v3.FixedHeapConfig
+            max_heap_size_bytes: 402653184      # 384 MiB of the pod's 512 MiB
+      actions:
+        - name: envoy.overload_actions.shrink_heap
+          triggers: [{name: envoy.resource_monitors.fixed_heap, threshold: {value: 0.90}}]
+        - name: envoy.overload_actions.stop_accepting_requests
+          triggers: [{name: envoy.resource_monitors.fixed_heap, threshold: {value: 0.95}}]
+        - name: envoy.overload_actions.reset_high_memory_stream
+          triggers:
+            - name: envoy.resource_monitors.fixed_heap
+              scaled: {scaling_threshold: 0.85, saturation_threshold: 0.95}
+      buffer_factory_config:
+        minimum_account_to_track_power_of_two: 20   # track streams that buffer 1 MiB or more
+
     static_resources:
       listeners:
         - name: maas
@@ -30,11 +51,48 @@ data:
               address: 0.0.0.0
               port_value: 8080
           filter_chains:
-            - filters: &maas_filters
+            - filters:
                 - name: envoy.filters.network.http_connection_manager
                   typed_config:
                     "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
                     stat_prefix: maas
+                    normalize_path: true
+                    merge_slashes: true
+                    path_with_escaped_slashes_action: REJECT_REQUEST
+                    access_log: &maas_access_log
+                      - name: envoy.access_loggers.stream
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                          log_format:
+                            json_format:
+                              time: "%START_TIME%"
+                              # From the key check's metadata: the route removes
+                              # the headers before the request goes upstream.
+                              key_id: "%DYNAMIC_METADATA(envoy.filters.http.ext_authz:x-maas-key-id)%"
+                              user: "%DYNAMIC_METADATA(envoy.filters.http.ext_authz:x-maas-user)%"
+                              plan: "%DYNAMIC_METADATA(envoy.filters.http.ext_authz:x-maas-plan)%"
+                              method: "%REQ(:METHOD)%"
+                              path: "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%"
+                              code: "%RESPONSE_CODE%"
+                              flags: "%RESPONSE_FLAGS%"
+                              duration_ms: "%DURATION%"
+                              bytes_sent: "%BYTES_SENT%"
+                              client: "%DOWNSTREAM_REMOTE_ADDRESS%"
+                              dropped: "%RESP(X-LLM-D-REQUEST-DROPPED-REASON)%"
+                              upstream: "%UPSTREAM_HOST%"
+                    local_reply_config: &maas_local_reply
+                      # Replies the gateway makes itself (the picker's capacity
+                      # 429s, the rate cap's) get a short Retry-After; a budget
+                      # refusal keeps its own.
+                      mappers:
+                        - filter:
+                            status_code_filter:
+                              comparison:
+                                op: EQ
+                                value: {default_value: 429, runtime_key: maas_local_reply_429}
+                          headers_to_add:
+                            - header: {key: Retry-After, value: "5"}
+                              append_action: ADD_IF_ABSENT
                     route_config:
                       name: maas
                       virtual_hosts:
@@ -45,16 +103,64 @@ data:
                             - header:
                                 key: x-maas-upstream
                                 value: "%UPSTREAM_REMOTE_ADDRESS%"
-                          routes:
+                          # Removed by the router, after the shim and the picker read them.
+                          request_headers_to_remove: [authorization, x-maas-user, x-maas-plan, x-maas-models,
+                                                      x-maas-key-id, x-maas-window, x-llm-d-inference-fairness-id]
+                          routes: &maas_routes
                             - match:
-                                prefix: "/"
-                              route:
+                                path: /v1/chat/completions
+                                headers: [{name: ":method", string_match: {exact: POST}}]
+                              route: &maas_model_route
                                 cluster: original_destination_cluster
                                 timeout: 600s
                                 idle_timeout: 600s
-                              # Checked already; the model server never sees the key.
-                              request_headers_to_remove: ["authorization"]
-                    http_filters:
+                            - match:
+                                path: /v1/completions
+                                headers: [{name: ":method", string_match: {exact: POST}}]
+                              route: *maas_model_route
+                            - match:
+                                path: /v1/embeddings
+                                headers: [{name: ":method", string_match: {exact: POST}}]
+                              route: *maas_model_route
+                            - match:
+                                path: /v1/models
+                                headers: [{name: ":method", string_match: {exact: GET}}]
+                              route: *maas_model_route
+                            # Outside the API: only the header key check runs, so a
+                            # keyless request still gets 401; no body check, budget
+                            # or picker for a 404.
+                            - match:
+                                prefix: "/"
+                              direct_response:
+                                status: 404
+                                body:
+                                  inline_string: "not found\n"
+                              typed_per_filter_config:
+                                maas.key_check_body:
+                                  "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig
+                                  disabled: true
+                                envoy.filters.http.wasm:
+                                  "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig
+                                  disabled: true
+                                envoy.filters.http.ext_proc:
+                                  "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig
+                                  disabled: true
+                    http_filters: &maas_http_filters
+                      # Caps the requests each pod passes to the key check
+                      # (maas_gateway_rate_per_second, maas_gateway_rate_burst).
+                      - name: envoy.filters.http.local_ratelimit
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+                          stat_prefix: maas_local_rate_limit
+                          token_bucket: {max_tokens: {{ maas_gateway_rate_burst | int }}, tokens_per_fill: {{ maas_gateway_rate_per_second | int }}, fill_interval: 1s}
+                          filter_enabled:
+                            default_value: {numerator: 100, denominator: HUNDRED}
+                            runtime_key: maas_local_rate_limit_enabled
+                          filter_enforced:
+                            default_value: {numerator: 100, denominator: HUNDRED}
+                            runtime_key: maas_local_rate_limit_enforced
+                          response_headers_to_add:
+                            - header: {key: x-maas-refusal, value: gateway-busy}
                       # Identity comes only from the key check below.
                       - name: envoy.filters.http.header_mutation
                         typed_config:
@@ -65,20 +171,43 @@ data:
                               - remove: x-maas-plan
                               - remove: x-maas-models
                               - remove: x-maas-user-type
+                              - remove: x-maas-key-id
+                              - remove: x-maas-window
                               - remove: x-llm-d-inference-fairness-id
+                              - remove: x-gateway-inference-fairness-id
+                              - remove: x-llm-d-inference-ttl
+                              - remove: x-llm-d-inference-objective
+                              - remove: x-gateway-inference-objective
+                              - remove: x-llm-d-model-name-rewrite
+                              - remove: x-gateway-model-name-rewrite
+                              - remove: x-gateway-destination-endpoint-subset
+                              - remove: x-llm-d-slo-ttft-ms
+                              - remove: x-slo-ttft-ms
+                              - remove: x-llm-d-slo-tpot-ms
+                              - remove: x-slo-tpot-ms
+                              - remove: x-llm-d-video-fps
+                              - remove: x-llm-d-video-duration-seconds
+                              - remove: x-llm-d-video-resolution
+                              - remove: x-llm-d-audio-duration-seconds
+                              - remove: x-llm-d-audio-bytes-per-second
+                              - remove: x-llm-d-revision-decision-id
+                              - remove: x-llm-d-pin-host-port
+                              - remove: x-gateway-destination-endpoint
                       # The key portal checks the key, and the requested model
                       # against the plan. Bodies over 4 MiB are refused (413).
+                      # The first check carries headers only, so a request
+                      # without a valid key is refused before its body is
+                      # buffered anywhere.
                       - name: envoy.filters.http.ext_authz
                         typed_config:
                           "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
                           transport_api_version: V3
                           failure_mode_allow: false
-                          with_request_body:
-                            max_request_bytes: 4194304
-                            allow_partial_message: false
+                          status_on_error:
+                            code: 503
                           http_service:
                             server_uri:
-                              uri: http://maas-keys.uat-project.svc:8081
+                              uri: https://maas-keys.{{ maas_namespace }}.svc:8081
                               cluster: maas_keys
                               timeout: 2s
                             path_prefix: /check
@@ -86,16 +215,72 @@ data:
                               allowed_headers:
                                 patterns:
                                   - exact: authorization
-                                  - exact: content-type
                             authorization_response:
+                              # Copied for the access log, which can't read the
+                              # headers once the route has removed them.
+                              dynamic_metadata_from_headers:
+                                patterns:
+                                  - exact: x-maas-key-id
+                                  - exact: x-maas-user
+                                  - exact: x-maas-plan
                               allowed_upstream_headers:
                                 patterns:
                                   - exact: x-maas-user
                                   - exact: x-maas-plan
                                   - exact: x-maas-models
+                                  - exact: x-maas-key-id
+                                  - exact: x-maas-window
+                                  - exact: x-llm-d-inference-fairness-id
+                              allowed_client_headers:
+                                patterns:
+                                  - exact: x-maas-user
+                                  - exact: x-maas-plan
+                                  - exact: x-maas-key-id
+                      # Its own name, so the 404 route can turn this one off.
+                      - name: maas.key_check_body
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+                          transport_api_version: V3
+                          failure_mode_allow: false
+                          status_on_error:
+                            code: 503
+                          with_request_body:
+                            max_request_bytes: 4194304
+                            allow_partial_message: false
+                          http_service:
+                            server_uri:
+                              uri: https://maas-keys.{{ maas_namespace }}.svc:8081
+                              cluster: maas_keys
+                              timeout: 2s
+                            path_prefix: /check/body
+                            authorization_request:
+                              allowed_headers:
+                                patterns:
+                                  - exact: authorization
+                                  - exact: content-type
+                            authorization_response:
+                              # Copied for the access log, which can't read the
+                              # headers once the route has removed them.
+                              dynamic_metadata_from_headers:
+                                patterns:
+                                  - exact: x-maas-key-id
+                                  - exact: x-maas-user
+                                  - exact: x-maas-plan
+                              allowed_upstream_headers:
+                                patterns:
+                                  - exact: x-maas-user
+                                  - exact: x-maas-plan
+                                  - exact: x-maas-models
+                                  - exact: x-maas-key-id
+                                  - exact: x-maas-window
                                   # The key's owner, for the picker's per-user
                                   # metrics and fair sharing of capacity.
                                   - exact: x-llm-d-inference-fairness-id
+                              allowed_client_headers:
+                                patterns:
+                                  - exact: x-maas-user
+                                  - exact: x-maas-plan
+                                  - exact: x-maas-key-id
                       - name: envoy.filters.http.wasm
                         typed_config:
                           "@type": type.googleapis.com/envoy.extensions.filters.http.wasm.v3.Wasm
@@ -122,11 +307,19 @@ data:
                                       "grpcService": "kuadrant.service.ratelimit.v1.RateLimitService",
                                       "grpcMethod": "CheckRateLimit"
                                     },
-                                    "token-report": {
+                                    "request-count": {
                                       "type": "dynamic",
                                       "endpoint": "limitador",
                                       "failureMode": "deny",
                                       "timeout": "100ms",
+                                      "grpcService": "envoy.service.ratelimit.v3.RateLimitService",
+                                      "grpcMethod": "ShouldRateLimit"
+                                    },
+                                    "token-report": {
+                                      "type": "dynamic",
+                                      "endpoint": "limitador",
+                                      "failureMode": "allow",
+                                      "timeout": "500ms",
                                       "grpcService": "kuadrant.service.ratelimit.v1.RateLimitService",
                                       "grpcMethod": "Report"
                                     }
@@ -151,8 +344,21 @@ data:
                                           "label": "token_check",
                                           "messageBuilder": "envoy.service.ratelimit.v3.RateLimitRequest { domain: \"maas\", hits_addend: 0u, descriptors: [ envoy.extensions.common.ratelimit.v3.RateLimitDescriptor { entries: [ envoy.extensions.common.ratelimit.v3.RateLimitDescriptor.Entry { key: \"user\", value: request.headers['x-maas-user'] }, envoy.extensions.common.ratelimit.v3.RateLimitDescriptor.Entry { key: \"plan\", value: request.headers['x-maas-plan'] } ] } ] }",
                                           "onReply": [
-                                            { "type": "deny", "predicate": "token_check.overall_code == 2", "terminal": true, "denyWith": "DenyResponse{status: 429u, headers: token_check.response_headers_to_add, body: \"Token budget exceeded\\n\"}" },
+                                            { "type": "deny", "predicate": "token_check.overall_code == 2", "terminal": true, "denyWith": "DenyResponse{status: 429u, headers: [['Retry-After', request.headers['x-maas-window']], ['x-maas-refusal', 'budget'], ['x-maas-plan', request.headers['x-maas-plan']], ['content-type', 'application/json']], body: \"{\\\"error\\\": {\\\"type\\\": \\\"budget_exceeded\\\", \\\"message\\\": \\\"Token budget exceeded; retry after the window in Retry-After\\\"}}\"}" },
                                             { "type": "fail", "predicate": "token_check.overall_code != 1 && token_check.overall_code != 2", "terminal": true, "logMessage": "Unknown rate limit response code from token_check" }
+                                          ]
+                                        },
+                                        {
+                                          "type": "grpc",
+                                          "var": "request_count",
+                                          "service": "request-count",
+                                          "predicate": "request.method == 'POST'",
+                                          "terminal": false,
+                                          "label": "request_count",
+                                          "messageBuilder": "envoy.service.ratelimit.v3.RateLimitRequest { domain: \"maas-requests\", hits_addend: 1u, descriptors: [ envoy.extensions.common.ratelimit.v3.RateLimitDescriptor { entries: [ envoy.extensions.common.ratelimit.v3.RateLimitDescriptor.Entry { key: \"user\", value: request.headers['x-maas-user'] }, envoy.extensions.common.ratelimit.v3.RateLimitDescriptor.Entry { key: \"plan\", value: request.headers['x-maas-plan'] } ] } ] }",
+                                          "onReply": [
+                                            { "type": "deny", "predicate": "request_count.overall_code == 2", "terminal": true, "denyWith": "DenyResponse{status: 429u, headers: [['Retry-After', request.headers['x-maas-window']], ['x-maas-refusal', 'requests'], ['x-maas-plan', request.headers['x-maas-plan']], ['content-type', 'application/json']], body: \"{\\\"error\\\": {\\\"type\\\": \\\"request_limit_exceeded\\\", \\\"message\\\": \\\"Request limit exceeded; retry after the window in Retry-After\\\"}}\"}" },
+                                            { "type": "fail", "predicate": "request_count.overall_code != 1 && request_count.overall_code != 2", "terminal": true, "logMessage": "Unknown rate limit response code from request_count" }
                                           ]
                                         },
                                         {
@@ -186,7 +392,7 @@ data:
                           grpc_service:
                             envoy_grpc:
                               cluster_name: epp
-                              authority: maas-epp.uat-project.svc:9002
+                              authority: maas-epp.{{ maas_namespace }}.svc:9002
                             timeout: 10s
                           processing_mode:
                             request_header_mode: SEND
@@ -201,7 +407,7 @@ data:
                           "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
 
         # The same gateway over TLS, for the Route (reencrypt). The certificate is
-        # the service CA's, for maas-gateway.uat-project.svc.
+        # the service CA's, for maas-gateway.{{ maas_namespace }}.svc.
         - name: maas-tls
           address:
             socket_address:
@@ -218,7 +424,26 @@ data:
                     tls_certificates:
                       - certificate_chain: {filename: /etc/tls/tls.crt}
                         private_key: {filename: /etc/tls/tls.key}
-              filters: *maas_filters
+              filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    stat_prefix: maas-tls
+                    normalize_path: true
+                    merge_slashes: true
+                    path_with_escaped_slashes_action: REJECT_REQUEST
+                    access_log: *maas_access_log
+                    local_reply_config: *maas_local_reply
+                    route_config:
+                      name: maas-tls
+                      virtual_hosts:
+                        - name: maas
+                          domains: ["*"]
+                          # Removed by the router, after the shim and the picker read them.
+                          request_headers_to_remove: [authorization, x-maas-user, x-maas-plan, x-maas-models,
+                                                      x-maas-key-id, x-maas-window, x-llm-d-inference-fairness-id]
+                          routes: *maas_routes
+                    http_filters: *maas_http_filters
 
         # Prometheus reads Envoy's stats here. Only /stats/prometheus is passed
         # to the pod-local admin interface; everything else gets 404.
@@ -269,6 +494,13 @@ data:
         - name: maas_keys
           type: STRICT_DNS
           connect_timeout: 1s
+          # Shorter than the key checker's 30 s idle close, so Envoy never
+          # sends a check on a connection the server is closing.
+          typed_extension_protocol_options:
+            envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+              "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+              common_http_protocol_options: {idle_timeout: 20s}
+              explicit_http_config: {http_protocol_options: {}}
           load_assignment:
             cluster_name: maas_keys
             endpoints:
@@ -276,8 +508,24 @@ data:
                   - endpoint:
                       address:
                         socket_address:
-                          address: maas-keys.uat-project.svc
+                          address: maas-keys.{{ maas_namespace }}.svc
                           port_value: 8081
+          # The key check serves TLS with a service CA certificate, the same
+          # one the UI uses; check it against the service CA and the portal's
+          # Service name.
+          transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+              sni: maas-keys.{{ maas_namespace }}.svc
+              common_tls_context:
+                validation_context:
+                  trusted_ca:
+                    filename: /etc/maas-ca/service-ca.crt
+                  match_typed_subject_alt_names:
+                    - san_type: DNS
+                      matcher:
+                        exact: maas-keys.{{ maas_namespace }}.svc
 
         - name: limitador
           type: STRICT_DNS
@@ -294,7 +542,7 @@ data:
                   - endpoint:
                       address:
                         socket_address:
-                          address: maas-limitador.uat-project.svc
+                          address: maas-limitador.{{ maas_namespace }}.svc
                           port_value: 8081
 
         - name: epp
@@ -313,7 +561,7 @@ data:
                   - endpoint:
                       address:
                         socket_address:
-                          address: maas-epp.uat-project.svc
+                          address: maas-epp.{{ maas_namespace }}.svc
                           port_value: 9002
           # The picker serves TLS with a service CA certificate; check it
           # against the service CA and the picker's Service name.
@@ -321,7 +569,7 @@ data:
             name: envoy.transport_sockets.tls
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
-              sni: maas-epp.uat-project.svc
+              sni: maas-epp.{{ maas_namespace }}.svc
               common_tls_context:
                 alpn_protocols: ["h2"]
                 validation_context:
@@ -330,13 +578,28 @@ data:
                   match_typed_subject_alt_names:
                     - san_type: DNS
                       matcher:
-                        exact: maas-epp.uat-project.svc
+                        exact: maas-epp.{{ maas_namespace }}.svc
 
-        # The picker writes the chosen pod's address into this header.
+        # The picker writes the chosen pod's address into this header. The model
+        # pods serve TLS with the service CA's certificate for the model
+        # Service's name; Envoy connects by pod IP and checks that name.
         - name: original_destination_cluster
           type: ORIGINAL_DST
-          connect_timeout: 600s
+          connect_timeout: 5s
           lb_policy: CLUSTER_PROVIDED
+          transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+              sni: maas-sim.{{ maas_namespace }}.svc
+              common_tls_context:
+                validation_context:
+                  trusted_ca:
+                    filename: /etc/maas-ca/service-ca.crt
+                  match_typed_subject_alt_names:
+                    - san_type: DNS
+                      matcher:
+                        exact: maas-sim.{{ maas_namespace }}.svc
           circuit_breakers:
             thresholds:
               - max_connections: 10000
@@ -350,12 +613,12 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: maas-gateway
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   labels:
     app.kubernetes.io/part-of: maas-test
     app: maas-gateway
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: maas-gateway
@@ -365,11 +628,22 @@ spec:
         app.kubernetes.io/part-of: maas-test
         app: maas-gateway
     spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: maas-gateway
+      # A pod being replaced keeps serving while its endpoint is removed and
+      # in-flight generations finish (maas_gateway_drain_seconds); Envoy exits
+      # promptly on SIGTERM after that.
+      terminationGracePeriodSeconds: {{ maas_gateway_drain_seconds | int + 30 }}
       initContainers:
         # The wasm-shim ships as a release file, not an image. Fetch the pinned
         # release and refuse it unless the checksum matches.
         - name: fetch-wasm-shim
-          image: registry.access.redhat.com/ubi9/ubi-minimal:9.6
+          image: registry.access.redhat.com/ubi9/ubi-minimal@sha256:34880b64c07f28f64d95737f82f891516de9a3b43583f39970f7bf8e4cfa48b7
           command:
             - sh
             - -c
@@ -382,7 +656,7 @@ spec:
               mountPath: /wasm
       containers:
         - name: envoy
-          image: docker.io/envoyproxy/envoy:v1.35.12
+          image: docker.io/envoyproxy/envoy@sha256:45876da26cbb8ef73ef86e985586f363a619eef9c0081a9c3a781cb4b3b9255e
           command: ["envoy"]
           # Envoy starts one worker per host CPU, each with its own wasm VM,
           # unless told otherwise.
@@ -394,6 +668,10 @@ spec:
               containerPort: 8443
             - name: metrics
               containerPort: 9901
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: {{ maas_gateway_drain_seconds | int }}
           readinessProbe:
             tcpSocket:
               port: 8080
@@ -433,7 +711,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: maas-service-ca
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   annotations:
     service.beta.openshift.io/inject-cabundle: "true"
   labels:
@@ -445,7 +723,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: maas-gateway
-  namespace: uat-project
+  namespace: "{{ maas_namespace }}"
   annotations:
     service.beta.openshift.io/serving-cert-secret-name: maas-gateway-tls
   labels:

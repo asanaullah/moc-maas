@@ -1,6 +1,7 @@
 # Assisted by Claude Opus
 # Applies the given manifest files, each a name under maas_manifests_dir
-# (manifests/ at the repository root): client-side apply, no waiting.
+# (manifests/ at the repository root), rendered as templates on the inventory
+# vars (the namespace and the apps domain): client-side apply, no waiting.
 # Pods are the exception: they are only created when missing. The project's
 # Role grants no patch on pods, and a pod's spec is largely immutable anyway,
 # so an existing pod is left as it is.
@@ -10,7 +11,7 @@
 
 - name: Read each manifest
   ansible.builtin.set_fact:
-    _maas_objects: "{{ _maas_objects + (lookup('ansible.builtin.file', maas_manifests_dir ~ '/' ~ item) | from_yaml_all | select | list) }}"
+    _maas_objects: "{{ _maas_objects + (lookup('ansible.builtin.template', maas_manifests_dir ~ '/' ~ item) | from_yaml_all | select | list) }}"
   loop: "{{ manifests }}"
   loop_control:
     label: "{{ item }}"

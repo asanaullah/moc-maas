@@ -25,7 +25,9 @@
       metadata:
         name: "{{ _maas_cronjob }}-{{ _maas_backup_stamp }}"
         labels: "{{ _maas_cronjob_info.resources[0].spec.jobTemplate.metadata.labels | default({}) }}"
-      spec: "{{ _maas_cronjob_info.resources[0].spec.jobTemplate.spec }}"
+      # Removed with its pod a day after it finishes, even if this play
+      # stops before its own cleanup; a failure's log stays readable till then.
+      spec: "{{ _maas_cronjob_info.resources[0].spec.jobTemplate.spec | combine({'ttlSecondsAfterFinished': 86400}) }}"
 
 - name: Wait for the backup to finish
   kubernetes.core.k8s_info:
@@ -72,3 +74,6 @@
     kind: Job
     api_version: batch/v1
     name: "{{ _maas_cronjob }}-{{ _maas_backup_stamp }}"
+    # The API's default for Jobs orphans their pods; take the pod along.
+    delete_options:
+      propagationPolicy: Background

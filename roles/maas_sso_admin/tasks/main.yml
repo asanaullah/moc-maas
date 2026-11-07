@@ -6,8 +6,8 @@
   ansible.builtin.assert:
     that:
       - maas_action is defined
-      - maas_action in ['init', 'groups', 'group-create', 'users', 'user-groups', 'add', 'remove', 'usage-client']
-    fail_msg: set maas_action to one of init, groups, group-create, users, user-groups, add, remove, usage-client
+      - maas_action in ['init', 'groups', 'group-create', 'users', 'user-groups', 'add', 'remove', 'usage-client', 'sync']
+    fail_msg: set maas_action to one of init, groups, group-create, users, user-groups, add, remove, usage-client, sync
     quiet: true
 
 - name: Find a running Keycloak pod

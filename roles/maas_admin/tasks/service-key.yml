@@ -6,13 +6,13 @@
   ansible.builtin.assert:
     that:
       - maas_owner is defined
-      - maas_owner is match('^[A-Za-z0-9._@-]+$')
+      - maas_owner is match('^[a-z0-9][a-z0-9._@-]{0,62}$')
       - maas_key_name is defined
       - maas_key_name is match('^[A-Za-z0-9._-]+$')
       - maas_plan is defined
-      - maas_plan is match('^[A-Za-z0-9._-]+$')
+      - maas_plan is match('^[a-z0-9][a-z0-9._-]{0,62}$')
       - maas_days is defined
-      - maas_days | int > 0
+      - 1 <= maas_days | int <= 3650
       - maas_secret_name is not defined or maas_secret_name is match('^[A-Za-z0-9._-]+$')
     fail_msg: set maas_owner, maas_key_name, maas_plan and maas_days; optional maas_secret_name to store the key in
     quiet: true
@@ -21,9 +21,19 @@
   kubernetes.core.k8s_exec:
     namespace: "{{ maas_namespace }}"
     pod: "{{ _maas_pod }}"
-    command: "python3 /tmp/maas-api.py POST /api/service-keys '{{ {'owner': maas_owner, 'name': maas_key_name, 'plan': maas_plan, 'days': maas_days | int} | to_json }}'"
+    command: "python3 /tmp/maas-api.py POST /api/service-keys '{{ {'owner': maas_owner, 'name': maas_key_name, 'plan': maas_plan, 'days': maas_days | int} | to_json }}' {{ _maas_actor_b64 }}"
   register: _maas_api
   no_log: true
+  failed_when: false
+  changed_when: _maas_api.rc == 0
+
+# The mint's output stays hidden (it carries the key); its error body carries
+# no key material, so a refusal is visible here.
+- name: Check the mint succeeded
+  ansible.builtin.assert:
+    that: _maas_api.rc == 0
+    fail_msg: "{{ _maas_api.stderr | trim }}"
+    quiet: true
 
 - name: Store the service key in a Secret
   kubernetes.core.k8s:
