@@ -6,3 +6,13 @@ __pycache__/
 .ruff_cache/
 .claude/
 build/
+.ansible/
+.venv/
+venv/
+.env
+*.log
+*.swp
+*~
+.idea/
+.vscode/
+.DS_Store
