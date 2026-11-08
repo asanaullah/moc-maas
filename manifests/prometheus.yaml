@@ -194,6 +194,7 @@ spec:
             - --storage.tsdb.min-block-duration=2h
             - --storage.tsdb.max-block-duration=2h
             - --web.listen-address=0.0.0.0:9090
+            - --web.enable-lifecycle
           ports:
             - {name: web, containerPort: 9090}
           readinessProbe:
@@ -215,6 +216,8 @@ spec:
             - --prometheus.url=http://127.0.0.1:9090
             - --tsdb.path=/prometheus
             - --objstore.config-file=/etc/thanos/objstore.yml
+            - --reloader.config-file=/etc/prometheus/prometheus.yml
+            - --reloader.rule-dir=/etc/prometheus
             - --grpc-address=0.0.0.0:10901
             - --http-address=0.0.0.0:10902
             # Query reaches this over TLS; the certificate is maas-thanos-grpc's.
@@ -230,6 +233,7 @@ spec:
             - {name: SSL_CERT_FILE, value: /etc/maas-s3-ca/s3-ca.crt}
           volumeMounts:
             - {name: data, mountPath: /prometheus}
+            - {name: config, mountPath: /etc/prometheus, readOnly: true}
             - {name: objstore, mountPath: /etc/thanos, readOnly: true}
             - {name: s3-ca, mountPath: /etc/maas-s3-ca, readOnly: true}
             - {name: grpc-tls, mountPath: /etc/tls/grpc, readOnly: true}

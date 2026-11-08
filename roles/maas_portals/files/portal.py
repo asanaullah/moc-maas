@@ -388,12 +388,16 @@ def write_limits(actor):
 
 
 def hourly_cap(tokens, window, hourly_tokens):
-    """The plan's hourly token cap, or None. Unset: for windows over an hour,
-    twice the plan's average hourly rate, so a user can't spend two budgets
-    around a window's boundary within minutes; 0: none; otherwise the value."""
+    """The plan's hourly token cap as Limitador gets it, or None. Unset: for
+    windows over an hour, twice the plan's average hourly rate, so a user can't
+    spend two budgets around a window's boundary within minutes; 0: none;
+    otherwise the value. On a window of an hour or more, a cap at or above the
+    window's budget is none."""
     if hourly_tokens is None:
-        return max(1, 2 * tokens * 3600 // window) if window > 3600 else None
-    return hourly_tokens or None
+        cap = max(1, 2 * tokens * 3600 // window) if window > 3600 else None
+    else:
+        cap = hourly_tokens or None
+    return cap if cap and (window < 3600 or cap < tokens) else None
 
 
 def limits_yaml():
@@ -409,7 +413,7 @@ def limits_yaml():
         out.append({"namespace": "maas", "max_value": tokens, "seconds": window,
                     "conditions": cond, "variables": var})
         hourly = hourly_cap(tokens, window, hourly_tokens)
-        if hourly and hourly < tokens:
+        if hourly:
             out.append({"namespace": "maas", "max_value": hourly, "seconds": 3600,
                         "conditions": cond, "variables": var})
         if max_requests:
@@ -559,8 +563,8 @@ class Admin(Base):
         none = "<span class=muted>none</span>"
         for name, models, tokens, window, days, prio, mrt, mreq, hourly in plans:
             cap = hourly_cap(tokens, window, hourly)
-            cap_text = (f"{cap:,}" if cap and cap < tokens else none) + \
-                (" <span class=muted>(default)</span>" if hourly is None and cap and cap < tokens else "")
+            cap_text = (f"{cap:,}" if cap else none) + \
+                (" <span class=muted>(default)</span>" if hourly is None and cap else "")
             b.append(f"<tr><td>{esc(name)}</td><td>{prio}</td>"
                      f"<td>{esc(', '.join(models)) or '<span class=muted>all</span>'}</td>"
                      f"<td>{tokens:,}</td><td>{window}</td><td>{days}</td>"
@@ -745,15 +749,16 @@ class Admin(Base):
             elif self.path == "/api/keys/revoke":
                 out = {"revoked": revoke("id = %s", (req["id"],), a, "revoked by an admin script")}
             elif self.path == "/api/users/reconcile":
-                groups = req.get("groups") or []
-                revoked = reconcile(req["owner"], groups, actor=a)
-                db("DELETE FROM sessions WHERE username = %s", (req["owner"],))
-                audit(a, "user.reconcile", req["owner"], groups=groups)
+                owner, groups = str(req["owner"]).strip().lower(), req.get("groups") or []
+                revoked = reconcile(owner, groups, actor=a)
+                db("DELETE FROM sessions WHERE username = %s", (owner,))
+                audit(a, "user.reconcile", owner, groups=groups)
                 out = {"revoked": revoked}
             elif self.path == "/api/users/revoke":
-                out = {"revoked": revoke("owner = %s AND revoked_at IS NULL", (req["owner"],), a,
+                owner = str(req["owner"]).strip().lower()
+                out = {"revoked": revoke("owner = %s AND revoked_at IS NULL", (owner,), a,
                                          "revoked by an admin script")}
-                db("DELETE FROM sessions WHERE username = %s", (req["owner"],))
+                db("DELETE FROM sessions WHERE username = %s", (owner,))
             else:
                 return self.send(404, json.dumps({"error": "not found"}), "application/json")
         except psycopg.errors.ForeignKeyViolation:
@@ -1078,7 +1083,7 @@ BODY_WAIT_SECONDS = 1.0              # under the gateway's 2 s key-check timeout
 SMALL_BODY_BYTES = 256 * 1024
 SMALL_BODY_SLOTS = threading.BoundedSemaphore(32)
 LARGE_BODY_SLOTS = threading.BoundedSemaphore(2)
-TOKEN_RE = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"|[{\[]')
+TOKEN_RE = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"?|[{\[]')
 TOP_FIELDS = ("model", "stream", "stream_options", "max_tokens", "max_completion_tokens", "n", "prompt")
 
 
@@ -1133,7 +1138,7 @@ def request_fields(text):
     def pairs(items):
         obj = _Obj(items)
         last[0] = items
-        usage = [k for k, _ in items if k.lower() == "include_usage"]
+        usage = [k for k, _ in items if k.casefold() == "include_usage"]
         if usage and (len(usage) > 1 or usage[0] != "include_usage"):
             obj.ambiguous_usage = True
         return obj
@@ -1144,7 +1149,7 @@ def request_fields(text):
         raise BodyError("request body is not valid JSON") from None
     if not isinstance(doc, dict):
         raise BodyError("request body is not a JSON object")
-    names = [k for k, _ in last[0] if k.lower() in TOP_FIELDS]
+    names = [k for k, _ in last[0] if k.casefold() in TOP_FIELDS]
     if len(names) != len(set(names)) or any(k not in TOP_FIELDS for k in names):
         raise BodyError(", ".join(TOP_FIELDS) + " must each appear at most once, in lower case")
     model, stream, opts = doc.get("model"), doc.get("stream"), doc.get("stream_options")

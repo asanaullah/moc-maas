@@ -92,6 +92,9 @@ class RequestFieldsTests(unittest.TestCase):
         '{"model":"m","n":"2"}',
         '{"model":"m","N":2}',
         '{"model":"m","prompt":"a","Prompt":"b"}',
+        '{"model":"m","\N{LATIN SMALL LETTER LONG S}tream":true}',
+        '{"model":"m","max_tokens":10,"max_token\N{LATIN SMALL LETTER LONG S}":100000}',
+        '{"model":"maas-sim","stream":true,"stream_options":{"include_usage":true,"include_u\N{LATIN SMALL LETTER LONG S}age":false}}',
         '[{"model":"m"}]',
         'not json',
     ]
@@ -134,6 +137,12 @@ class RequestFieldsTests(unittest.TestCase):
             with self.assertRaises(portal.BodyError):
                 portal.request_fields(body)
             self.assertLess(time.monotonic() - start, 2)
+
+    def test_unterminated_string_is_refused_quickly(self):
+        start = time.monotonic()
+        with self.assertRaises(portal.BodyError):
+            portal.request_fields('{"model":"m","messages":"' + '\\"' * 50_000)
+        self.assertLess(time.monotonic() - start, 2)
 
     def test_one_long_string_is_fine(self):
         self.assertEqual(portal.request_fields('{"model":"m","messages":["' + "a" * 4_000_000 + '"]}')["model"], "m")
@@ -326,10 +335,53 @@ class SmallTests(unittest.TestCase):
             out = json.loads(portal.limits_yaml())
         self.assertEqual([(lim["seconds"], lim["max_value"]) for lim in out], [(86400, 24000), (3600, 2000)])
 
+    def test_explicit_hourly_cap_on_short_windows(self):
+        self.assertEqual(portal.hourly_cap(20000, 60, 300000), 300000)
+        self.assertIsNone(portal.hourly_cap(20000, 3600, 30000))
+        with mock.patch.object(portal, "db", return_value=[("m", 20000, 60, None, 300000)]):
+            out = json.loads(portal.limits_yaml())
+        self.assertEqual([(lim["seconds"], lim["max_value"]) for lim in out], [(60, 20000), (3600, 300000)])
+
     def test_optional_int(self):
         self.assertIsNone(portal.optional_int(""))
         self.assertIsNone(portal.optional_int(None))
         self.assertEqual(portal.optional_int("7"), 7)
+
+
+class AdminApiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = portal.serve(portal.Admin, "127.0.0.1", 0)
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+        cls.port = cls.srv.server_address[1]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+        cls.srv.server_close()
+        portal.SERVERS.remove(cls.srv)
+
+    def post(self, path, body):
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        c.request("POST", path, body=json.dumps(body).encode(),
+                  headers={"X-MaaS-Admin": "1", "Content-Type": "application/json"})
+        r = c.getresponse()
+        out = r.status, json.loads(r.read())
+        c.close()
+        return out
+
+    def test_user_endpoints_match_the_owner_in_lower_case(self):
+        owner = "jane.doe@example.com"
+        with mock.patch.object(portal, "db") as db, mock.patch.object(portal, "audit"), \
+                mock.patch.object(portal, "revoke", return_value=2) as revoke, \
+                mock.patch.object(portal, "reconcile", return_value=0) as reconcile:
+            self.assertEqual(self.post("/api/users/revoke", {"owner": " Jane.Doe@Example.com "}),
+                             (200, {"revoked": 2}))
+            self.assertEqual(revoke.call_args.args[1], (owner,))
+            self.assertEqual(self.post("/api/users/reconcile", {"owner": "Jane.Doe@Example.com", "groups": []}),
+                             (200, {"revoked": 0}))
+            self.assertEqual(reconcile.call_args.args[0], owner)
+        self.assertEqual([c.args[1] for c in db.call_args_list], [(owner,), (owner,)])
 
 
 class ReconcilerTests(unittest.TestCase):
