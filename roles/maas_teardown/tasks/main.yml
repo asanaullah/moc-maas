@@ -18,6 +18,7 @@
   loop:
     - {kind: Route, api: route.openshift.io/v1}
     - {kind: Deployment, api: apps/v1}
+    - {kind: StatefulSet, api: apps/v1}
     - {kind: Service, api: v1}
     - {kind: ConfigMap, api: v1}
     - {kind: CronJob, api: batch/v1}
@@ -62,6 +63,7 @@
   loop:
     - {kind: Route, api: route.openshift.io/v1}
     - {kind: Deployment, api: apps/v1}
+    - {kind: StatefulSet, api: apps/v1}
     - {kind: Service, api: v1}
     - {kind: ConfigMap, api: v1}
     - {kind: CronJob, api: batch/v1}

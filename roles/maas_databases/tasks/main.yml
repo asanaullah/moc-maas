@@ -1,5 +1,49 @@
 # Assisted by Claude Opus
 # PostgreSQL for the portals and for Keycloak.
+- name: Check that you may create StatefulSets
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: authorization.k8s.io/v1
+      kind: SelfSubjectAccessReview
+      spec:
+        resourceAttributes:
+          namespace: "{{ maas_namespace }}"
+          group: apps
+          resource: statefulsets
+          verb: create
+  register: _maas_sts_access
+
+- name: Stop before anything is removed if you may not
+  ansible.builtin.assert:
+    that: _maas_sts_access.result.status.allowed | default(false)
+    fail_msg: >-
+      you may not create StatefulSets in {{ maas_namespace }}; apply
+      manifests/prereqs/project-admin-role.yaml (or the same rule in the chart that manages this Role) first
+    quiet: true
+
+- name: Remove the database Deployments from before the StatefulSets
+  kubernetes.core.k8s:
+    state: absent
+    kind: Deployment
+    api_version: apps/v1
+    namespace: "{{ maas_namespace }}"
+    name: "{{ item }}"
+    delete_options:
+      propagationPolicy: Background
+  loop: [maas-db, maas-sso-db]
+
+- name: Wait until no pod of those Deployments is left
+  kubernetes.core.k8s_info:
+    kind: Pod
+    namespace: "{{ maas_namespace }}"
+    label_selectors: ["app={{ item }}", "pod-template-hash"]
+  loop: [maas-db, maas-sso-db]
+  register: _maas_old_db_pods
+  until: _maas_old_db_pods.resources | length == 0
+  retries: "{{ (maas_rollout_timeout | int / maas_poll_delay | int) | int }}"
+  delay: "{{ maas_poll_delay }}"
+
 - name: Apply the databases
   ansible.builtin.include_role:
     name: maas_common
@@ -12,6 +56,6 @@
 - name: Wait for the databases
   ansible.builtin.include_role:
     name: maas_common
-    tasks_from: wait_deployments
+    tasks_from: wait_statefulsets
   vars:
-    deployments: [maas-db, maas-sso-db]
+    statefulsets: [maas-db, maas-sso-db]

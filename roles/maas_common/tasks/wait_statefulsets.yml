@@ -1,0 +1,20 @@
+# Assisted by Claude Opus
+# Waits until each StatefulSet is rolled out and Ready, or maas_rollout_timeout passes.
+- name: Wait for the StatefulSets to roll out
+  kubernetes.core.k8s_info:
+    kind: StatefulSet
+    api_version: apps/v1
+    namespace: "{{ maas_namespace }}"
+    name: "{{ item }}"
+  register: _maas_sts
+  until: >-
+    _maas_sts.resources | length > 0
+    and (_maas_sts.resources | first).metadata.generation
+        == (_maas_sts.resources | first).status.observedGeneration | default(0)
+    and (_maas_sts.resources | first).spec.replicas
+        == (_maas_sts.resources | first).status.readyReplicas | default(-1)
+    and (_maas_sts.resources | first).status.currentRevision | default('')
+        == (_maas_sts.resources | first).status.updateRevision | default('-')
+  retries: "{{ (maas_rollout_timeout | int / maas_poll_delay | int) | int }}"
+  delay: "{{ maas_poll_delay }}"
+  loop: "{{ statefulsets }}"

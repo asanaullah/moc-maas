@@ -596,7 +596,7 @@ class Admin(Base):
                      f"action=/groups/delete>{csrf}<input type=hidden name=group value='{esc(g)}'>"
                      "<button>remove</button></form></td></tr>")
         b.append(f"</table><form method=post action=/groups>{csrf}<input name=group placeholder='group name' "
-                 f"required pattern='[A-Za-z0-9._-]{1,255}'> <select name=plan required>{opts}</select> "
+                 f"required pattern='[A-Za-z0-9._-]{{1,255}}'> <select name=plan required>{opts}</select> "
                  "<button>map group to plan</button></form>")
         b.append(f"<h2>Service keys</h2><p class=muted>For applications and pipelines, not people.</p>"
                  f"<form method=post action=/service-keys>{csrf}<input name=owner placeholder='service name' "
@@ -1079,7 +1079,7 @@ SMALL_BODY_BYTES = 256 * 1024
 SMALL_BODY_SLOTS = threading.BoundedSemaphore(32)
 LARGE_BODY_SLOTS = threading.BoundedSemaphore(2)
 TOKEN_RE = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"|[{\[]')
-TOP_FIELDS = ("model", "stream", "stream_options", "max_tokens", "max_completion_tokens")
+TOP_FIELDS = ("model", "stream", "stream_options", "max_tokens", "max_completion_tokens", "n", "prompt")
 
 
 def within_budget(text):
@@ -1119,12 +1119,13 @@ def _int_field(name, v):
 
 def request_fields(text):
     """The fields the key check reads, read strictly: one JSON object; model,
-    stream, stream_options, max_tokens, max_completion_tokens and
+    stream, stream_options, max_tokens, max_completion_tokens, n, prompt and
     stream_options.include_usage each at most once and in lower case (Go's
     decoder matches keys case-insensitively, Python keeps the last repeat);
-    model a string, stream and include_usage booleans, the caps integers.
-    Returns a dict with model, stream, include_usage, max_tokens and
-    max_completion_tokens."""
+    model a string, stream and include_usage booleans, the caps and n integers.
+    Returns a dict with model, stream, include_usage, max_tokens,
+    max_completion_tokens, n and prompts (the length of a list of prompts,
+    otherwise 1)."""
     if not within_budget(text):
         raise BodyError("request body has too many JSON values")
     last = [None]  # pairs of the object closed last: the top level, once parsing ends
@@ -1158,9 +1159,13 @@ def request_fields(text):
     include_usage = (opts or {}).get("include_usage")
     if include_usage is not None and not isinstance(include_usage, bool):
         raise BodyError("stream_options.include_usage must be true or false")
+    prompt = doc.get("prompt")
+    prompts = len(prompt) if (isinstance(prompt, list) and prompt
+                              and all(isinstance(p, (str, list)) for p in prompt)) else 1
     return {"model": model, "stream": stream is True, "include_usage": include_usage is True,
             "max_tokens": _int_field("max_tokens", doc.get("max_tokens")),
-            "max_completion_tokens": _int_field("max_completion_tokens", doc.get("max_completion_tokens"))}
+            "max_completion_tokens": _int_field("max_completion_tokens", doc.get("max_completion_tokens")),
+            "n": _int_field("n", doc.get("n")), "prompts": prompts}
 
 
 def count_check(result, headers=None):
@@ -1440,13 +1445,19 @@ class Validate(Base):
                 return self.send(400, "streaming requests must set stream_options.include_usage to true",
                                  "text/plain")
             cap = limits.get("max_request_tokens")
-            if cap:
+            api = self.path.split("?", 1)[0].removeprefix("/check/body")
+            if cap and api != "/v1/embeddings":
                 asked = [v for v in (fields["max_tokens"], fields["max_completion_tokens"]) if v is not None]
                 if not asked:
                     return self.send(400, f"your plan needs max_tokens (at most {cap}) on every request",
                                      "text/plain")
-                if max(asked) > cap:
-                    return self.send(400, f"max_tokens is above your plan's cap of {cap}", "text/plain")
+                n = max(fields["n"] or 1, 1)
+                prompts = fields["prompts"] if api == "/v1/completions" else 1
+                if max(asked) * n * prompts > cap:
+                    if n * prompts == 1:
+                        return self.send(400, f"max_tokens is above your plan's cap of {cap}", "text/plain")
+                    return self.send(400, f"max_tokens x n x prompts ({max(asked)} x {n} x {prompts}) is above "
+                                     f"your plan's cap of {cap}", "text/plain")
             model = fields["model"]
             if models and model not in models.split(","):
                 count_check("model_denied", headers)

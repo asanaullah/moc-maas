@@ -2,7 +2,7 @@
 # One scratch restore: a Postgres pod with emptyDir storage and the backup
 # folder mounted read-only; the newest dump is restored and counted, then the
 # pod is removed. _maas_restore carries name, live (the live database's
-# Deployment), subdir and pattern (where the dumps are), user, db and the
+# pod), subdir and pattern (where the dumps are), user, db and the
 # sanity query.
 - name: "Remove a leftover {{ _maas_restore.name }}"
   kubernetes.core.k8s:

@@ -89,6 +89,9 @@ class RequestFieldsTests(unittest.TestCase):
         '{"model":1}',
         '{"model":"m","max_tokens":true}',
         '{"model":"m","max_tokens":1.5}',
+        '{"model":"m","n":"2"}',
+        '{"model":"m","N":2}',
+        '{"model":"m","prompt":"a","Prompt":"b"}',
         '[{"model":"m"}]',
         'not json',
     ]
@@ -105,6 +108,17 @@ class RequestFieldsTests(unittest.TestCase):
         self.assertEqual((f["stream"], f["include_usage"]), (True, True))
         f = portal.request_fields('{"model":"m","max_tokens":100,"max_completion_tokens":50}')
         self.assertEqual((f["max_tokens"], f["max_completion_tokens"]), (100, 50))
+
+    def test_n_and_prompts(self):
+        cases = [('{"model":"m"}', None, 1),
+                 ('{"model":"m","n":3,"prompt":"one"}', 3, 1),
+                 ('{"model":"m","prompt":["a","b","c"]}', None, 3),
+                 ('{"model":"m","prompt":[[1,2],[3]]}', None, 2),
+                 ('{"model":"m","prompt":[1,2,3]}', None, 1)]
+        for body, n, prompts in cases:
+            with self.subTest(body=body):
+                f = portal.request_fields(body)
+                self.assertEqual((f["n"], f["prompts"]), (n, prompts))
 
     def test_nested_fields_are_not_checked(self):
         body = json.dumps({"model": "maas-sim", "messages": [{"role": "user", "content": "hi", "model": "x"}],
@@ -194,6 +208,24 @@ class ValidateTests(unittest.TestCase):
         self.assertEqual(self.post('{"model":"maas-sim","max_tokens":101}')[0], 400)
         self.assertEqual(self.post('{"model":"maas-sim","max_completion_tokens":101}')[0], 400)
         self.assertEqual(self.post('{"model":"maas-sim"}')[0], 400)
+
+    def test_per_request_cap_counts_n(self):
+        self.limits = {"max_request_tokens": 100}
+        self.assertEqual(self.post('{"model":"maas-sim","max_tokens":50,"n":2}')[0], 200)
+        self.assertEqual(self.post('{"model":"maas-sim","max_tokens":51,"n":2}')[0], 400)
+
+    def test_per_request_cap_counts_prompts_on_completions(self):
+        self.limits = {"max_request_tokens": 100}
+        body = '{"model":"maas-sim","max_tokens":40,"prompt":["a","b","c"]}'
+        self.assertEqual(self.post(body, path="/check/body/v1/completions")[0], 400)
+        self.assertEqual(self.post(body.replace(',"c"', ""), path="/check/body/v1/completions")[0], 200)
+        self.assertEqual(self.post(body)[0], 200)
+
+    def test_per_request_cap_skips_embeddings(self):
+        self.limits = {"max_request_tokens": 100}
+        for path in ("/check/body/v1/embeddings", "/check/body/v1/embeddings?x=1"):
+            with self.subTest(path=path):
+                self.assertEqual(self.post('{"model":"maas-sim","input":"hi"}', path=path)[0], 200)
 
     def test_body_over_limit_is_413_without_reading(self):
         c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)

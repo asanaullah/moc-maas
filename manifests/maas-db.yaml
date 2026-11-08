@@ -18,7 +18,7 @@ data:
     ssl_key_file = '/tls/tls.key'
 ---
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: maas-db
   namespace: "{{ maas_namespace }}"
@@ -26,10 +26,9 @@ metadata:
     app.kubernetes.io/part-of: maas-test
     app: maas-db
 spec:
-  replicas: 1
   # One writer on the data directory at a time.
-  strategy:
-    type: Recreate
+  replicas: 1
+  serviceName: maas-db
   selector:
     matchLabels:
       app: maas-db

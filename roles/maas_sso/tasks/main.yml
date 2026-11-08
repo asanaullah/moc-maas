@@ -10,6 +10,14 @@
   vars:
     manifests: [maas-sso.yaml]
 
+- name: Restart Keycloak to pick up its proxy config
+  ansible.builtin.include_role:
+    name: maas_common
+    tasks_from: restart_deployments
+  vars:
+    deployments: [maas-sso]
+    configmaps: [maas-sso-proxy]
+
 - name: Wait for Keycloak
   ansible.builtin.include_role:
     name: maas_common

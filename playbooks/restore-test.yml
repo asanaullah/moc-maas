@@ -20,14 +20,14 @@
       ansible.builtin.include_tasks: _restore-one.yml
       loop:
         - name: maas-restore-portals
-          live: deploy/maas-db
+          live: maas-db-0
           subdir: maas/backups
           pattern: maas-*.dump
           user: maas
           db: maas
           counts: SELECT 'plans' AS what, count(*) FROM plans UNION ALL SELECT 'group_plans', count(*) FROM group_plans UNION ALL SELECT 'api_keys', count(*) FROM api_keys
         - name: maas-restore-sso
-          live: deploy/maas-sso-db
+          live: maas-sso-db-0
           subdir: maas/sso-backups
           pattern: maas-sso-*.dump
           user: keycloak
