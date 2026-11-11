@@ -1,0 +1,240 @@
+# Assisted by Claude Opus
+# Reads the two YAML files, the governance data and Keycloak, plans the
+# changes, and either reports them (default) or applies them.
+- name: Check the sync files exist
+  ansible.builtin.stat:
+    path: "{{ maas_sync_dir }}/{{ item }}"
+  loop: [subscriptions.yaml, users.yaml]
+  register: _sync_files
+  changed_when: false
+
+- name: Fail when a sync file is missing
+  ansible.builtin.assert:
+    that:
+      - _sync_files.results[0].stat.exists
+      - _sync_files.results[1].stat.exists
+    fail_msg: "put subscriptions.yaml and users.yaml in {{ maas_sync_dir }} (set maas_sync_dir=...)"
+    quiet: true
+
+- name: Read the desired groups and users
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ role_path }}/files/sync_plan.py"
+      - --subscriptions
+      - "{{ maas_sync_dir }}/subscriptions.yaml"
+      - --users
+      - "{{ maas_sync_dir }}/users.yaml"
+      - --requirements
+  register: _sync_req_raw
+  changed_when: false
+
+- name: Remember the desired groups and users
+  ansible.builtin.set_fact:
+    _sync_req: "{{ _sync_req_raw.stdout | from_json }}"
+
+- name: Check the sync files
+  ansible.builtin.assert:
+    that: _sync_req.errors | length == 0
+    fail_msg: "{{ _sync_req.errors | join('; ') }}"
+    quiet: true
+
+- name: Find a running Keycloak pod
+  ansible.builtin.include_role:
+    name: maas_common
+    tasks_from: find_pod
+  vars:
+    pod_label: app=maas-sso
+    pod_what: deploy/maas-sso
+
+- name: Remember the kcadm wrapper, base64-encoded
+  ansible.builtin.set_fact:
+    _sync_kcadm_b64: "{{ lookup('ansible.builtin.file', role_path ~ '/../maas_sso_admin/files/kcadm.sh') | b64encode }}"
+  no_log: true
+
+- name: Put the kcadm wrapper into the pod
+  kubernetes.core.k8s_exec:
+    namespace: "{{ maas_namespace }}"
+    pod: "{{ _maas_pod }}"
+    container: keycloak
+    command: "bash -c 'echo {{ _sync_kcadm_b64 }} | base64 -d > /tmp/maas-kcadm.sh'"
+  changed_when: false
+
+- name: List the Keycloak groups
+  kubernetes.core.k8s_exec:
+    namespace: "{{ maas_namespace }}"
+    pod: "{{ _maas_pod }}"
+    container: keycloak
+    command: bash /tmp/maas-kcadm.sh groups
+  register: _sync_kc_groups
+  changed_when: false
+
+- name: List each desired user's groups
+  kubernetes.core.k8s_exec:
+    namespace: "{{ maas_namespace }}"
+    pod: "{{ _maas_pod }}"
+    container: keycloak
+    command: "bash /tmp/maas-kcadm.sh user-groups {{ item }}"
+  loop: "{{ _sync_req.emails }}"
+  register: _sync_user_groups
+  failed_when: false
+  changed_when: false
+  loop_control:
+    label: "{{ item }}"
+
+- name: Remember which users exist
+  ansible.builtin.set_fact:
+    _sync_kc_users: "{{ _sync_kc_users | default({}) | combine({item.item: {'exists': item.rc == 0, 'groups': (item.stdout_lines | default([]) | select | list)}}) }}"
+  loop: "{{ _sync_user_groups.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Fail when a user's groups could not be read
+  ansible.builtin.assert:
+    that: item.rc == 0 or "no user with email" in (item.stderr | default(''))
+    fail_msg: "cannot list the groups of {{ item.item }}: {{ item.stderr | default('') }}"
+    quiet: true
+  loop: "{{ _sync_user_groups.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: List each managed group's members
+  kubernetes.core.k8s_exec:
+    namespace: "{{ maas_namespace }}"
+    pod: "{{ _maas_pod }}"
+    container: keycloak
+    command: "bash /tmp/maas-kcadm.sh group-members {{ item }}"
+  loop: "{{ _sync_req.groups }}"
+  register: _sync_group_members
+  failed_when: false
+  changed_when: false
+  loop_control:
+    label: "{{ item }}"
+
+- name: Remember the members
+  ansible.builtin.set_fact:
+    _sync_kc_members: "{{ _sync_kc_members | default({}) | combine({item.item: (item.stdout_lines | default([]) | select | list)}) }}"
+  loop: "{{ _sync_group_members.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Fail when a group's members could not be read
+  ansible.builtin.assert:
+    that: item.rc == 0 or "no group" in (item.stderr | default(''))
+    fail_msg: "cannot list the members of {{ item.item }}: {{ item.stderr | default('') }}"
+    quiet: true
+  loop: "{{ _sync_group_members.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Read the governance data
+  kubernetes.core.k8s_info:
+    kind: ConfigMap
+    namespace: "{{ maas_namespace }}"
+    name: maas-governance
+  register: _sync_gov
+
+- name: Check the governance ConfigMap
+  ansible.builtin.assert:
+    that: _sync_gov.resources | length > 0
+    fail_msg: ConfigMap maas-governance is missing; deploy the MaaS first
+    quiet: true
+
+- name: Plan and clean up
+  block:
+    - name: Make a temporary governance file
+      ansible.builtin.tempfile:
+        state: file
+        prefix: maas-sync-governance-
+      register: _sync_gov_file
+
+    - name: Write the governance objects
+      ansible.builtin.copy:
+        content: "{{ _sync_gov.resources[0].data['objects.yaml'] }}"
+        dest: "{{ _sync_gov_file.path }}"
+        mode: "0600"
+
+    - name: Make a temporary Keycloak state file
+      ansible.builtin.tempfile:
+        state: file
+        prefix: maas-sync-state-
+      register: _sync_state_file
+
+    - name: Write the Keycloak state
+      ansible.builtin.copy:
+        content: "{{ {'keycloak': {'groups': (_sync_kc_groups.stdout_lines | select | list), 'users': _sync_kc_users | default({}), 'members': _sync_kc_members | default({})}} | to_nice_json }}"
+        dest: "{{ _sync_state_file.path }}"
+        mode: "0600"
+
+    - name: Build the planner command
+      ansible.builtin.set_fact:
+        _sync_argv: "{{ ['python3', role_path ~ '/files/sync_plan.py',
+                         '--subscriptions', maas_sync_dir ~ '/subscriptions.yaml',
+                         '--users', maas_sync_dir ~ '/users.yaml',
+                         '--governance', _sync_gov_file.path,
+                         '--state', _sync_state_file.path]
+                        + (['--prune'] if (maas_sync_prune | bool) else []) }}"
+
+    - name: Compute the plan
+      ansible.builtin.command:
+        argv: "{{ _sync_argv }}"
+      register: _sync_plan_raw
+      changed_when: false
+  always:
+    - name: Remove the temporary files
+      ansible.builtin.file:
+        state: absent
+        path: "{{ item }}"
+      loop:
+        - "{{ _sync_gov_file.path | default('') }}"
+        - "{{ _sync_state_file.path | default('') }}"
+      when: item | length > 0
+
+- name: Remember the plan
+  ansible.builtin.set_fact:
+    _sync_plan: "{{ _sync_plan_raw.stdout | from_json }}"
+
+- name: Check the plan
+  ansible.builtin.assert:
+    that: _sync_plan.errors | length == 0
+    fail_msg: "{{ _sync_plan.errors | join('; ') }}"
+    quiet: true
+
+- name: Report the plan
+  ansible.builtin.debug:
+    msg: >-
+      {{ [_sync_plan.summary]
+         + (_sync_plan.changes | map(attribute='description') | list)
+         + (_sync_plan.removals | map(attribute='description') | list)
+         + (_sync_plan.pending | map(attribute='description') | list)
+         + _sync_plan.warnings }}
+
+- name: Apply the plan
+  ansible.builtin.include_tasks: apply.yml
+  when: maas_sync_apply | bool
+
+- name: Fail when there is drift in check mode
+  ansible.builtin.assert:
+    that:
+      - _sync_plan.changes | length == 0
+      - _sync_plan.removals | length == 0
+      - _sync_plan.pending | length == 0
+    fail_msg: "drift found; rerun with -e maas_sync_apply=true (and -e maas_sync_prune=true to remove extras)"
+    quiet: true
+  when: not (maas_sync_apply | bool)
+
+- name: Fail when a user must sign in first
+  ansible.builtin.assert:
+    that: _sync_plan.pending | length == 0
+    fail_msg: "{{ _sync_plan.pending | map(attribute='description') | join('; ') }}"
+    quiet: true
+  when: maas_sync_apply | bool
+
+- name: Fail when extras remain without prune
+  ansible.builtin.assert:
+    that: _sync_plan.removals | length == 0
+    fail_msg: "extra state remains; rerun with -e maas_sync_prune=true to remove it: {{ _sync_plan.removals | map(attribute='description') | join('; ') }}"
+    quiet: true
+  when:
+    - maas_sync_apply | bool
+    - not (maas_sync_prune | bool)

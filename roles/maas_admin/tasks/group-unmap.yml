@@ -3,17 +3,38 @@
   ansible.builtin.assert:
     that:
       - maas_group is defined
-      - maas_group is match('^[A-Za-z0-9._-]+$')
-    fail_msg: set maas_group to the group's name
+      - maas_group is match('^[a-zA-Z0-9:._-]+$')
+      - maas_subscription is defined
+      - maas_subscription is match('^[a-z0-9][a-z0-9._-]{0,62}$')
+    fail_msg: set maas_group and maas_subscription
     quiet: true
 
-- name: Unmap the group
-  kubernetes.core.k8s_exec:
-    namespace: "{{ maas_namespace }}"
-    pod: "{{ _maas_pod }}"
-    command: "python3 /tmp/maas-api.py POST /api/groups/delete '{{ {'group': maas_group} | to_json }}' {{ _maas_actor_b64 }}"
-  register: _maas_api
+- name: Read the governance data
+  ansible.builtin.include_tasks: governance-read.yml
 
-- name: Report
-  ansible.builtin.debug:
-    msg: "{{ _maas_api.stdout }}"
+- name: Remove the group from the subscription and its access policy
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ role_path }}/files/governance_edit.py"
+      - --file
+      - "{{ _maas_gov_file.path }}"
+      - group-unmap
+      - --subscription
+      - "{{ maas_subscription }}"
+      - --group
+      - "{{ maas_group }}"
+      - --namespace
+      - "{{ maas_namespace }}"
+  register: _maas_gov_edit
+  changed_when: _maas_gov_edit.rc == 0
+
+- name: Save and re-render
+  ansible.builtin.include_tasks: governance-save.yml
+
+- name: Record the action
+  ansible.builtin.include_tasks: audit-write.yml
+  vars:
+    _maas_target: "subscription/{{ maas_subscription }}"
+    _maas_details:
+      group: "{{ maas_group }}"

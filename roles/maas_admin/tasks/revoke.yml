@@ -4,16 +4,21 @@
     that:
       - maas_key_id is defined
       - maas_key_id is match('^[A-Za-z0-9._-]+$')
-    fail_msg: set maas_key_id to the key's id
+    fail_msg: set maas_key_id
     quiet: true
 
 - name: Revoke the key
-  kubernetes.core.k8s_exec:
-    namespace: "{{ maas_namespace }}"
-    pod: "{{ _maas_pod }}"
-    command: "python3 /tmp/maas-api.py POST /api/keys/revoke '{{ {'id': maas_key_id} | to_json }}' {{ _maas_actor_b64 }}"
-  register: _maas_api
+  ansible.builtin.include_tasks: maas-api.yml
+  vars:
+    _maas_api_method: DELETE
+    _maas_api_path: "/v1/api-keys/{{ maas_key_id }}"
 
 - name: Report
   ansible.builtin.debug:
-    msg: "{{ _maas_api.stdout }}"
+    msg: "{{ _maas_api_output | from_json }}"
+
+- name: Record the action
+  ansible.builtin.include_tasks: audit-write.yml
+  vars:
+    _maas_target: "key/{{ maas_key_id }}"
+    _maas_details: {}

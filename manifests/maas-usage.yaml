@@ -1,8 +1,8 @@
-# The user dashboard, its own pod running portal.py in MODE=usage.
-# Users sign in through Keycloak with the maas-usage client and see
-# only their own usage: this window against their budget (live from
-# Limitador), the last 24 hours and the last 30 days (from Thanos Query), and
-# their keys. Every query is built server-side and fixed to the signed-in user.
+# The user dashboard, running portal.py.
+# Users sign in through Keycloak with the maas-usage client and see only their
+# own usage: this window against each subscription's budget (live from
+# Limitador), the last 24 hours and the last 30 days (from Thanos Query).
+# Every query is built server-side and fixed to the signed-in user.
 # Exposed by its Route (maas-usage-route.yaml).
 apiVersion: apps/v1
 kind: Deployment
@@ -51,6 +51,10 @@ spec:
           env:
             - name: MODE
               value: usage
+            - name: NAMESPACE
+              value: "{{ maas_namespace }}"
+            - name: GOVERNANCE_FILE
+              value: /governance/objects.json
             - name: ROUTE_HOST
               value: maas-usage-{{ maas_namespace }}.{{ maas_apps_domain }}
             - name: OIDC_ISSUER
@@ -69,9 +73,13 @@ spec:
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef: {name: maas-db, key: DATABASE_URL}
+            - name: MAASAPI_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: maas-db-config, key: MAASAPI_PASSWORD}
           ports:
             - {name: https, containerPort: 8443}
             - {name: health, containerPort: 8081}
+            - {name: metrics, containerPort: 9100}
           lifecycle:
             preStop:
               sleep:
@@ -86,6 +94,10 @@ spec:
             failureThreshold: 3
           volumeMounts:
             - {name: code, mountPath: /opt/maa/portal.py, subPath: portal.py}
+            - {name: governance, mountPath: /governance, readOnly: true}
+            - name: storage
+              mountPath: /volumes/{{ maas_namespace }}-storage
+              readOnly: true
             - {name: tls, mountPath: /etc/tls, readOnly: true}
           resources:
             requests: {cpu: 50m, memory: 128Mi}
@@ -93,6 +105,11 @@ spec:
       volumes:
         - name: code
           configMap: {name: maas-portal-code}
+        - name: governance
+          configMap: {name: maas-usage-governance}
+        - name: storage
+          persistentVolumeClaim:
+            claimName: "{{ maas_namespace }}-storage"
         - name: tls
           secret: {secretName: maas-usage-tls}
 ---
@@ -112,3 +129,4 @@ spec:
     app: maas-usage
   ports:
     - {name: https, port: 8443, targetPort: 8443}
+    - {name: metrics, port: 9100, targetPort: 9100}

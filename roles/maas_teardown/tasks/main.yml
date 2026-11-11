@@ -18,6 +18,7 @@
   loop:
     - {kind: Route, api: route.openshift.io/v1}
     - {kind: Deployment, api: apps/v1}
+    - {kind: StatefulSet, api: apps/v1}
     - {kind: Service, api: v1}
     - {kind: ConfigMap, api: v1}
     - {kind: CronJob, api: batch/v1}
@@ -62,6 +63,7 @@
   loop:
     - {kind: Route, api: route.openshift.io/v1}
     - {kind: Deployment, api: apps/v1}
+    - {kind: StatefulSet, api: apps/v1}
     - {kind: Service, api: v1}
     - {kind: ConfigMap, api: v1}
     - {kind: CronJob, api: batch/v1}
@@ -90,8 +92,13 @@
     # These match the data a teardown keeps unless asked to wipe it. The
     # GitHub OAuth app's credentials (maas-sso-github) aren't generated, so
     # they stay either way.
-    _maas_data_secrets: [maas-db, maas-sso-db, maas-sso-admin, maas-portal-oidc,
-                         maas-usage-oidc, maas-reconciler-oidc, maas-kcadm]
+    _maas_data_secrets: [maas-db, maas-db-config, maas-sso-db, maas-sso-admin, maas-usage-oidc,
+                         maas-kcadm,
+                         maas-kube-token-seeder, maas-kube-token-authorino, maas-kube-token-maas-api,
+                         maas-kube-token-ipp, maas-kube-token-prometheus, maas-kube-token-ops,
+                         maas-kube-auth,
+                         maas-kube-kubeconfig-seeder, maas-kube-kubeconfig-authorino,
+                         maas-kube-kubeconfig-maas-api, maas-kube-kubeconfig-ipp]
   loop_control:
     label: "{{ item }}"
 
@@ -106,9 +113,10 @@
     msg: >-
       The MaaS is removed from {{ maas_namespace }}. Database files and backups
       on the storage volume (maas/) were kept, with the Secrets they need
-      (maas-db, maas-sso-db, maas-sso-admin, maas-portal-oidc, maas-usage-oidc,
-      maas-reconciler-oidc, maas-kcadm) and maas-sso-github; the metrics bucket
-      was left alone. Re-run with -e maas_wipe_data=true for a fresh install.
+      (maas-db, maas-db-config, maas-sso-db, maas-sso-admin, maas-usage-oidc,
+      maas-kcadm, the maas-kube token and kubeconfig Secrets) and
+      maas-sso-github; the metrics bucket was left alone. Re-run with
+      -e maas_wipe_data=true for a fresh install.
   when: not (maas_wipe_data | default(false) | bool)
 
 - name: Note what is left

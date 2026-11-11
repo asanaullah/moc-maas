@@ -3,12 +3,17 @@
 # secrets that are missing, so the Jinja references to _maas_new never fail.
 maas_generated_secrets:
   - maas-db
+  - maas-db-config
   - maas-sso-db
   - maas-sso-admin
-  - maas-portal-oidc
   - maas-usage-oidc
-  - maas-reconciler-oidc
   - maas-kcadm
+  - maas-kube-token-seeder
+  - maas-kube-token-authorino
+  - maas-kube-token-maas-api
+  - maas-kube-token-ipp
+  - maas-kube-token-prometheus
+  - maas-kube-token-ops
 
 maas_secret_string_data:
   maas-db:
@@ -23,11 +28,16 @@ maas_secret_string_data:
   maas-sso-admin:
     KC_BOOTSTRAP_ADMIN_USERNAME: maas-admin
     KC_BOOTSTRAP_ADMIN_PASSWORD: "{{ _maas_new['maas-sso-admin'] }}"
-  maas-portal-oidc:
-    client-secret: "{{ _maas_new['maas-portal-oidc'] }}"
+  maas-db-config:
+    MAASAPI_PASSWORD: "{{ _maas_new['maas-db-config'] }}"
+    DB_CONNECTION_URL: "postgresql://maasapi:{{ _maas_new['maas-db-config'] }}@maas-db.{{ maas_namespace }}.svc:5432/maasapi?sslmode=verify-full&sslrootcert=/etc/maas-ca/service-ca.crt"
   maas-usage-oidc:
     client-secret: "{{ _maas_new['maas-usage-oidc'] }}"
-  maas-reconciler-oidc:
-    client-secret: "{{ _maas_new['maas-reconciler-oidc'] }}"
   maas-kcadm:
     client-secret: "{{ _maas_new['maas-kcadm'] }}"
+  maas-kube-token-seeder: {token: "{{ _maas_new['maas-kube-token-seeder'] }}"}
+  maas-kube-token-authorino: {token: "{{ _maas_new['maas-kube-token-authorino'] }}"}
+  maas-kube-token-maas-api: {token: "{{ _maas_new['maas-kube-token-maas-api'] }}"}
+  maas-kube-token-ipp: {token: "{{ _maas_new['maas-kube-token-ipp'] }}"}
+  maas-kube-token-prometheus: {token: "{{ _maas_new['maas-kube-token-prometheus'] }}"}
+  maas-kube-token-ops: {token: "{{ _maas_new['maas-kube-token-ops'] }}"}

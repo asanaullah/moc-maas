@@ -1,0 +1,6 @@
+maasmodelref.maas.opendatahub.io/maas-sim
+maassubscription.maas.opendatahub.io/standard
+maassubscription.maas.opendatahub.io/free
+maasauthpolicy.maas.opendatahub.io/standard-access
+maasauthpolicy.maas.opendatahub.io/free-access
+authconfig.authorino.kuadrant.io/maas-gateway-auth

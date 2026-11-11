@@ -1,9 +1,6 @@
-# Limitador, the token counter. The gateway sends each request's user
-# and plan as descriptors; each plan's limit keeps one counter per user.
-# The admin portal owns the limits: it writes one per plan at startup and on
-# every plan change, so the maas-limits ConfigMap is created empty by the
-# playbook and never applied over again. Until the portal writes the limits
-# there are none, so start the admin portal before sending traffic.
+# Limitador, the token counter. The gateway sends each subscription's
+# descriptor; the governance role writes one limit per subscription and model,
+# plus a deny-all limit for models no subscription covers.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -26,13 +23,11 @@ spec:
       shareProcessNamespace: true
       containers:
         - name: limitador
-          image: quay.io/kuadrant/limitador@sha256:67011e2ce560e97e2b13dcb8bb23becb3c5f365180cbe4277100216451725ae6
+          image: "{{ maas_image_limitador }}"
           # The image's entrypoint is limitador-server.
           args:
-            # Every descriptor entry (user, plan) becomes a label on Limitador's
-            # counters: tokens, calls and 429s per user and per service key.
             - --metric-labels-default
-            - descriptors[0]
+            - descriptors[1]
             - /etc/limitador/limits.yaml
             - redis
             - redis://maas-redis:6379

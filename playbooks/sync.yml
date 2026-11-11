@@ -1,0 +1,16 @@
+# Assisted by Claude Opus
+# Reconciles the MaaS users and subscriptions with two YAML files:
+#
+#   ansible-playbook -i clusters/<cluster>.yml playbooks/sync.yml
+#   ansible-playbook -i clusters/<cluster>.yml playbooks/sync.yml -e maas_sync_apply=true
+#   ansible-playbook -i clusters/<cluster>.yml playbooks/sync.yml \
+#     -e maas_sync_dir=$PWD/sync/local -e maas_sync_apply=true
+#   ... -e maas_sync_prune=true     # also remove extras
+#
+# Check is the default and never writes. Apply adds and updates; prune is the
+# only mode that removes users from groups or deletes subscriptions.
+- name: MaaS users and subscriptions
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - maas_sync

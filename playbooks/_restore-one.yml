@@ -2,7 +2,7 @@
 # One scratch restore: a Postgres pod with emptyDir storage and the backup
 # folder mounted read-only; the newest dump is restored and counted, then the
 # pod is removed. _maas_restore carries name, live (the live database's
-# Deployment), subdir and pattern (where the dumps are), user, db and the
+# pod), subdir and pattern (where the dumps are), user, db and the
 # sanity query.
 - name: "Remove a leftover {{ _maas_restore.name }}"
   kubernetes.core.k8s:
@@ -38,9 +38,10 @@
                   - {name: POSTGRESQL_USER, value: "{{ _maas_restore.user }}"}
                   - {name: POSTGRESQL_PASSWORD, value: restore-test}
                   - {name: POSTGRESQL_DATABASE, value: "{{ _maas_restore.db }}"}
-                  # So pg_restore and psql in `oc exec` connect over TCP as that user.
-                  - {name: PGHOST, value: 127.0.0.1}
-                  - {name: PGPASSWORD, value: restore-test}
+                  # No PGHOST/PGPASSWORD here: the image's own setup steps honor
+                  # them and would try TCP before the server listens. The
+                  # pg_restore/psql commands in `oc exec` use the trusted local
+                  # socket.
                 # 127.0.0.1 on purpose: while initialising, the image runs a
                 # temporary server on its local socket only.
                 readinessProbe:
@@ -94,7 +95,13 @@
           - --
           - bash
           - -c
-          - PGPASSWORD="$POSTGRESQL_PASSWORD" psql -h 127.0.0.1 -U "$POSTGRESQL_USER" -d "$POSTGRESQL_DATABASE" -At -c "$0"
+          # $1 names the password variable, so the maasapi database can use
+          # its own user without putting the secret on a command line.
+          - PGPASSWORD="${!1}" psql -h 127.0.0.1 -U "$2" -d "$3" -At -c "$4"
+          - _
+          - "{{ _maas_restore.live_password_env | default('POSTGRESQL_PASSWORD') }}"
+          - "{{ _maas_restore.live_user | default(_maas_restore.user) }}"
+          - "{{ _maas_restore.live_db | default(_maas_restore.db) }}"
           - "{{ _maas_restore.counts }}"
       register: _maas_live_counts
       changed_when: false

@@ -5,6 +5,7 @@
 #
 #   ansible-playbook -i clusters/oac-dev-workload0.yml playbooks/sso-admin.yml -e maas_action=<action>
 #
+#   maas_action=help
 #   maas_action=groups
 #   maas_action=group-create -e maas_group=<group>
 #   maas_action=users

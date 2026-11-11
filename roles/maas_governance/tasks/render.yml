@@ -1,0 +1,96 @@
+# Assisted by Claude Opus
+- name: Check the governance input
+  ansible.builtin.assert:
+    that:
+      - maas_governance_input is defined
+      - maas_governance_input is sequence
+      - maas_governance_input | length > 0
+    fail_msg: the governance data must be a non-empty list
+    quiet: true
+
+- name: Make a temporary output directory
+  ansible.builtin.tempfile:
+    state: directory
+    prefix: maas-governance-
+  register: _maas_governance_tmp
+  when: out is not defined
+
+- name: Set the output directory
+  ansible.builtin.set_fact:
+    _maas_governance_out: "{{ out | default(_maas_governance_tmp.path) }}"
+
+- name: Make a temporary input file
+  ansible.builtin.tempfile:
+    state: file
+    prefix: maas-governance-input-
+  register: _maas_governance_input_file
+
+- name: Write the governance input
+  ansible.builtin.copy:
+    content: "{{ maas_governance_input | to_nice_yaml }}"
+    dest: "{{ _maas_governance_input_file.path }}"
+    mode: "0600"
+
+- name: Render the governance outputs
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ role_path }}/files/render.py"
+      - --objects
+      - "{{ _maas_governance_input_file.path }}"
+      - --out
+      - "{{ _maas_governance_out }}"
+      - --namespace
+      - "{{ maas_namespace }}"
+      - --gateway-host
+      - "{{ maas_gateway_host }}"
+      - --sso-host
+      - "{{ maas_sso_host }}"
+      - --oidc-client
+      - "{{ maas_oidc_client_id }}"
+      - --cache-ttl
+      - "{{ maas_cache_ttl }}"
+      - --admin-group
+      - "{{ maas_admin_group }}"
+      - --authconfig-name
+      - "{{ maas_authconfig_name }}"
+      - --api-port
+      - "{{ maas_api_port }}"
+      - --auth-timeout
+      - "{{ maas_auth_timeout }}"
+      - --ratelimit-timeout
+      - "{{ maas_ratelimit_timeout }}"
+  register: _maas_governance_render
+  changed_when: true
+  failed_when: _maas_governance_render.rc != 0
+
+- name: Start the model identities
+  ansible.builtin.set_fact:
+    maas_governance_models: []
+
+- name: Add each model's identity
+  ansible.builtin.set_fact:
+    maas_governance_models: "{{ maas_governance_models + [{'name': item.metadata.name, 'publisher_id': 'publishers/' ~ maas_namespace ~ '/models/' ~ item.metadata.annotations['maas.moc/served-name']}] }}"
+  loop: "{{ maas_governance_input | selectattr('kind', 'equalto', 'MaaSModelRef') | list }}"
+  loop_control:
+    label: "{{ item.metadata.name }}"
+
+- name: Read the rendered outputs
+  ansible.builtin.set_fact:
+    _maas_seed_objects_yaml: "{{ lookup('ansible.builtin.file', _maas_governance_out ~ '/objects.yaml') }}"
+    _maas_seed_status_txt: "{{ lookup('ansible.builtin.file', _maas_governance_out ~ '/status.txt') }}"
+    _maas_seed_names_txt: "{{ lookup('ansible.builtin.file', _maas_governance_out ~ '/names.txt') }}"
+    _maas_authconfig_yaml: "{{ lookup('ansible.builtin.file', _maas_governance_out ~ '/authconfig.yaml') }}"
+    _maas_limits_yaml: "{{ lookup('ansible.builtin.file', _maas_governance_out ~ '/limits.yaml') }}"
+    _maas_wasm_config_json: "{{ lookup('ansible.builtin.file', _maas_governance_out ~ '/wasm-config.json') }}"
+
+- name: Remove the temporary output directory
+  ansible.builtin.file:
+    state: absent
+    path: "{{ _maas_governance_out }}"
+  when: out is not defined
+
+- name: Remove the temporary input file
+  ansible.builtin.file:
+    state: absent
+    path: "{{ _maas_governance_input_file.path }}"

@@ -16,3 +16,18 @@ venv/
 .idea/
 .vscode/
 .DS_Store
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+# Local users and subscriptions
+sync/local/
+# Local credentials and certificates
+.maas/
+*.crt
+*.key
+*.pem
+kubeconfig
+kubeconfig.*
+*.kubeconfig
+pull-secret*

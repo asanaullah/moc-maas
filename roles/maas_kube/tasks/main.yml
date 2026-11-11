@@ -1,0 +1,157 @@
+# Assisted by Claude Opus
+# The private API server: etcd, kube-apiserver and a seeder holding the MaaS
+# CRDs, RBAC, kubeconfigs and tokens the upstream components read.
+- name: Map the token Secrets to users
+  ansible.builtin.set_fact:
+    _maas_kube_users:
+      maas-kube-token-seeder: {user: maas-seeder, admin: true, kubeconfig: seeder}
+      maas-kube-token-authorino: {user: maas-authorino, kubeconfig: authorino}
+      maas-kube-token-maas-api: {user: maas-api, kubeconfig: maas-api}
+      maas-kube-token-ipp: {user: maas-ipp, kubeconfig: ipp}
+      maas-kube-token-prometheus: {user: maas-prometheus}
+      maas-kube-token-ops: {user: maas-ops, admin: true}
+    _maas_kube_kubeconfig_items:
+      - maas-kube-token-seeder
+      - maas-kube-token-authorino
+      - maas-kube-token-maas-api
+      - maas-kube-token-ipp
+
+- name: Read the kube tokens
+  kubernetes.core.k8s_info:
+    kind: Secret
+    namespace: "{{ maas_namespace }}"
+    name: "{{ item }}"
+  loop: "{{ _maas_kube_users | list }}"
+  register: _maas_kube_tokens
+  no_log: true
+
+- name: Start the token lines
+  ansible.builtin.set_fact:
+    _maas_kube_token_lines: []
+
+- name: Build the token file
+  ansible.builtin.set_fact:
+    _maas_kube_token_lines: "{{ _maas_kube_token_lines + [ (item.resources[0].data.token | b64decode) ~ ',' ~ _maas_kube_users[item.item].user ~ ',' ~ _maas_kube_users[item.item].user ~ (',system:masters' if _maas_kube_users[item.item].admin | default(false) else '') ] }}"
+  loop: "{{ _maas_kube_tokens.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  no_log: true
+
+- name: Apply the token file Secret
+  kubernetes.core.k8s:
+    state: present
+    server_side_apply:
+      field_manager: maas-admin
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: maas-kube-auth
+        namespace: "{{ maas_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: "{{ maas_part_of }}"
+      stringData:
+        tokens.csv: "{{ _maas_kube_token_lines | join('\n') }}\n"
+  no_log: true
+
+- name: Apply the kubeconfig Secrets
+  kubernetes.core.k8s:
+    state: present
+    server_side_apply:
+      field_manager: maas-admin
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "maas-kube-kubeconfig-{{ _maas_kube_users[item.item].kubeconfig }}"
+        namespace: "{{ maas_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: "{{ maas_part_of }}"
+      stringData:
+        kubeconfig: "{{ lookup('ansible.builtin.template', 'kubeconfig.j2') }}"
+  vars:
+    kube_user: "{{ _maas_kube_users[item.item].user }}"
+    kube_token: "{{ item.resources[0].data.token | b64decode }}"
+    kube_server: "{{ 'https://127.0.0.1:' ~ maas_kube_port if item.item == 'maas-kube-token-seeder' else 'https://maas-kube.' ~ maas_namespace ~ '.svc:' ~ maas_kube_port }}"
+    kube_server_name: "{{ 'maas-kube.' ~ maas_namespace ~ '.svc' if item.item == 'maas-kube-token-seeder' else '' }}"
+  loop: "{{ _maas_kube_tokens.results | selectattr('item', 'in', _maas_kube_kubeconfig_items) | list }}"
+  loop_control:
+    label: "{{ item.item }}"
+  no_log: true
+
+- name: Find the CRD files
+  ansible.builtin.set_fact:
+    _maas_kube_crd_files: "{{ query('ansible.builtin.fileglob', role_path ~ '/files/crds/*.yaml') | sort }}"
+
+- name: Apply one ConfigMap per CRD file
+  kubernetes.core.k8s:
+    state: present
+    server_side_apply:
+      field_manager: maas-admin
+    definition: "{{ {'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata': {'name': 'maas-kube-crd-' ~ ((item | basename) | regex_replace('[.]yaml$', '') | regex_replace('[._]', '-')), 'namespace': maas_namespace, 'labels': {'app.kubernetes.io/part-of': maas_part_of}}, 'data': {(item | basename): lookup('ansible.builtin.file', item)}} }}"
+  loop: "{{ _maas_kube_crd_files }}"
+  loop_control:
+    label: "{{ item | basename }}"
+
+- name: Remember the CRD ConfigMap names
+  ansible.builtin.set_fact:
+    maas_kube_crd_configmaps: "{{ _maas_kube_crd_files | map('basename') | map('regex_replace', '\\.yaml$', '') | map('regex_replace', '[._]', '-') | map('regex_replace', '^', 'maas-kube-crd-') | list }}"
+
+- name: Start the CRD content
+  ansible.builtin.set_fact:
+    _maas_kube_crd_content: ""
+
+- name: Add each CRD file's content
+  ansible.builtin.set_fact:
+    _maas_kube_crd_content: "{{ _maas_kube_crd_content + lookup('ansible.builtin.file', item) }}"
+  loop: "{{ _maas_kube_crd_files }}"
+  loop_control:
+    label: "{{ item | basename }}"
+
+- name: Compute the CRD hash
+  ansible.builtin.set_fact:
+    maas_kube_crd_hash: "{{ _maas_kube_crd_content | hash('sha256') }}"
+
+- name: Apply the base objects ConfigMap
+  kubernetes.core.k8s:
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: maas-kube-base
+        namespace: "{{ maas_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: "{{ maas_part_of }}"
+      data:
+        base.yaml: "{{ lookup('ansible.builtin.template', 'base.yaml.j2') }}"
+
+- name: Apply the seeder script ConfigMap
+  kubernetes.core.k8s:
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: maas-kube-seeder
+        namespace: "{{ maas_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: "{{ maas_part_of }}"
+      data:
+        seed.sh: "{{ lookup('ansible.builtin.file', role_path ~ '/files/seed.sh') }}"
+
+- name: Apply the private API server
+  ansible.builtin.include_role:
+    name: maas_common
+    tasks_from: apply
+  vars:
+    manifests: [maas-kube.yaml]
+
+- name: Wait for the private API server
+  ansible.builtin.include_role:
+    name: maas_common
+    tasks_from: wait_deployments
+  vars:
+    deployments: [maas-kube]

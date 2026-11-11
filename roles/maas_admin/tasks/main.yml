@@ -1,39 +1,21 @@
 # Assisted by Claude Opus
-# Runs one admin command through the admin portal's JSON API, from inside
-# the portal's own pod (it has no Service; it listens on the pod's localhost
-# only). The command is maas_action; each action file checks its own
-# arguments.
-# The action is maas_action on the command line; another role that includes
-# this one while maas_action is already pinned (an extra var always wins)
-# passes maas_admin_action instead.
+# One admin action over the governance data or maas-api. Each action file
+# checks its own arguments.
 - name: Check the action
   ansible.builtin.assert:
     that:
       - maas_admin_action | default(maas_action) is defined
-      - maas_admin_action | default(maas_action) in ['plans', 'plan-set', 'plan-delete', 'groups', 'group-map', 'group-unmap', 'limits', 'keys', 'service-key', 'revoke', 'revoke-user', 'user-reconcile', 'tui-cleanup', 'audit', 'api']
-    fail_msg: set maas_action to one of plans, plan-set, plan-delete, groups, group-map, group-unmap, limits, keys, service-key, revoke, revoke-user, user-reconcile, tui-cleanup, audit, api
+      - maas_admin_action | default(maas_action) in ['help', 'subscriptions', 'subscription-set', 'subscription-delete', 'group-map', 'group-unmap', 'models', 'model-set', 'model-delete', 'render', 'keys', 'revoke', 'revoke-user', 'service-key', 'tui-setup', 'tui-cleanup', 'audit']
+    fail_msg: >-
+      set maas_action to one of help, subscriptions, subscription-set,
+      subscription-delete, group-map, group-unmap, models, model-set,
+      model-delete, render, keys, revoke, revoke-user, service-key, tui-setup,
+      tui-cleanup, audit
     quiet: true
 
-- name: Find a running admin portal pod
-  ansible.builtin.include_role:
-    name: maas_common
-    tasks_from: find_pod
-  vars:
-    pod_label: app=maas-admin
-    pod_what: deploy/maas-admin
-
-# Base64 through bash: keeps the delivery independent of tar, which some
-# images (Keycloak's, for one) ship without.
-- name: Remember the API helper, base64-encoded
+- name: Remember the action
   ansible.builtin.set_fact:
-    _maas_api_b64: "{{ lookup('ansible.builtin.file', role_path ~ '/files/api.py') | b64encode }}"
-  no_log: true
-
-- name: Put the API helper into the pod
-  kubernetes.core.k8s_exec:
-    namespace: "{{ maas_namespace }}"
-    pod: "{{ _maas_pod }}"
-    command: "bash -c 'echo {{ _maas_api_b64 }} | base64 -d > /tmp/maas-api.py'"
+    _maas_action: "{{ maas_admin_action | default(maas_action) }}"
 
 - name: Who is running this
   kubernetes.core.k8s:
@@ -42,10 +24,21 @@
       apiVersion: authentication.k8s.io/v1
       kind: SelfSubjectReview
   register: _maas_ssr
+  when: _maas_action != 'help'
 
-- name: Remember the operator for the audit trail
+- name: Remember the operator
   ansible.builtin.set_fact:
-    _maas_actor_b64: "{{ (_maas_ssr.result.status.userInfo.username | default('')) | b64encode }}"
+    _maas_actor: "{{ _maas_ssr.result.status.userInfo.username | default('') }}"
+  when: _maas_action != 'help'
 
-- name: "Run {{ maas_admin_action | default(maas_action) }}"
-  ansible.builtin.include_tasks: "{{ maas_admin_action | default(maas_action) }}.yml"
+- name: Find a gateway pod
+  ansible.builtin.include_role:
+    name: maas_common
+    tasks_from: find_pod
+  vars:
+    pod_label: app=maas-gateway
+    pod_what: deploy/maas-gateway
+  when: _maas_action in ['keys', 'revoke', 'revoke-user', 'service-key', 'tui-cleanup']
+
+- name: "Run {{ _maas_action }}"
+  ansible.builtin.include_tasks: "{{ _maas_action }}.yml"

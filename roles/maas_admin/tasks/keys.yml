@@ -1,5 +1,11 @@
 # Assisted by Claude Opus
 - name: List the keys
-  ansible.builtin.include_tasks: get-list.yml
+  ansible.builtin.include_tasks: maas-api.yml
   vars:
-    _maas_path: /api/keys
+    _maas_api_method: POST
+    _maas_api_path: /v1/api-keys/search
+    _maas_api_body: "{{ {'filters': {'username': maas_username}} if maas_username is defined else {} }}"
+
+- name: Report
+  ansible.builtin.debug:
+    msg: "{{ _maas_api_output | from_json }}"

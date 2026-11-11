@@ -85,10 +85,10 @@
       no_log: true
 
     # Deployments don't restart on Secret changes by themselves.
-    - name: Restart the portals onto the new database URL
+    - name: Restart the usage page onto the new database URL
       ansible.builtin.command:
         argv: [oc, rollout, restart, -n, "{{ maas_namespace }}", "deployment/{{ item }}"]
-      loop: [maas-admin, maas-keys, maas-usage]
+      loop: [maas-usage]
       when: _maas_db_url_fixed is changed
       register: _maas_restart
       failed_when: _maas_restart.rc != 0 and 'not found' not in _maas_restart.stderr

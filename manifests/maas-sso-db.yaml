@@ -3,7 +3,7 @@
 # maas-sso-db Secret (deploy.yml). Data lives on {{ maas_namespace }}-storage
 # under maas/sso-postgres; backups under maas/sso-backups.
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: maas-sso-db
   namespace: "{{ maas_namespace }}"
@@ -11,10 +11,9 @@ metadata:
     app.kubernetes.io/part-of: maas-test
     app: maas-sso-db
 spec:
-  replicas: 1
   # One writer on the data directory at a time.
-  strategy:
-    type: Recreate
+  replicas: 1
+  serviceName: maas-sso-db
   selector:
     matchLabels:
       app: maas-sso-db

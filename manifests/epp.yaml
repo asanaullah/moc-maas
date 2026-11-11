@@ -1,7 +1,6 @@
 # The endpoint picker. It watches the InferencePool and its pods and
-# tells the gateway which emulator pod gets each request. Prefix-cache scoring
-# carries the most weight, for chat; flow control holds requests while the
-# pool is busy or at zero replicas.
+# tells the gateway which emulator pod gets each request, with its built-in
+# queue, KV-cache and prefix-cache scoring. The pool is FailOpen.
 apiVersion: inference.networking.k8s.io/v1
 kind: InferencePool
 metadata:
@@ -19,7 +18,7 @@ spec:
     name: maas-epp
     port:
       number: 9002
-    failureMode: FailClose
+    failureMode: FailOpen
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -30,39 +29,25 @@ metadata:
     app.kubernetes.io/part-of: maas-test
 data:
   config.yaml: |
-    apiVersion: llm-d.ai/v1
+    apiVersion: llm-d.ai/v1alpha1
     kind: EndpointPickerConfig
-    featureGates: ["flowControl"]
     plugins:
-      - type: prefix-cache-scorer
       - type: queue-scorer
       - type: kv-cache-utilization-scorer
-      - type: max-score-picker
-      # The model pods serve TLS. The picker scrapes them by pod IP and can't
-      # set the server name to check (v1.0.0 has a CA path but no server name),
-      # so the scrape is encrypted but not verified; it carries load metrics
-      # only. Requests go through the gateway, which does check the name.
+      - type: prefix-cache-scorer
       - type: metrics-data-source
-        parameters:
-          scheme: https
-          path: /metrics
-          insecureSkipVerify: true
+        parameters: {scheme: https, path: /metrics, insecureSkipVerify: true}
       - type: core-metrics-extractor
     dataLayer:
       sources:
         - pluginRef: metrics-data-source
-          extractors:
-            - pluginRef: core-metrics-extractor
+          extractors: [{pluginRef: core-metrics-extractor}]
     schedulingProfiles:
       - name: default
         plugins:
-          - pluginRef: prefix-cache-scorer
-            weight: 3
-          - pluginRef: queue-scorer
-            weight: 1
-          - pluginRef: kv-cache-utilization-scorer
-            weight: 1
-          - pluginRef: max-score-picker
+          - {pluginRef: queue-scorer, weight: 2}
+          - {pluginRef: kv-cache-utilization-scorer, weight: 2}
+          - {pluginRef: prefix-cache-scorer, weight: 3}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -73,7 +58,15 @@ metadata:
     app.kubernetes.io/part-of: maas-test
     app: maas-epp
 spec:
-  replicas: 1
+  replicas: 2
+  # Leader election and a rolling update deadlock: the new pod cannot become
+  # Ready until the old leader's lease is free, and the Deployment will not
+  # stop the old leader first. This matches the upstream chart.
+  strategy:
+    type: Recreate
+    # The previous object carries the default rollingUpdate block; null clears
+    # it, because the API rejects it with Recreate.
+    rollingUpdate: null
   selector:
     matchLabels:
       app: maas-epp
@@ -85,9 +78,20 @@ spec:
     spec:
       # From manifests/prereqs: read access to the pool and its pods.
       serviceAccountName: uat-epp
+      # Best effort: spread the two replicas over nodes when the cluster has
+      # more than one, but still schedule both on a single-node cluster.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: maas-epp
       containers:
         - name: epp
-          image: ghcr.io/llm-d/llm-d-router-endpoint-picker@sha256:024188e998f516879f68532016ca24fabca00afbdcc2af9a61b17634e197df2c
+          image: "{{ maas_image_epp }}"
           args:
             - --pool-name=maas-pool
             - --pool-namespace={{ maas_namespace }}
@@ -103,6 +107,9 @@ spec:
             - --metrics-endpoint-auth=false
             # No trace collector in this namespace; exporting only logs errors.
             - --tracing=false
+            # Two replicas, one active: the standby holds a warm datastore and
+            # takes the lease when the leader goes away.
+            - --ha-enable-leader-election
           ports:
             - name: grpc
               containerPort: 9002
@@ -110,9 +117,15 @@ spec:
               containerPort: 9003
             - name: metrics
               containerPort: 9090
+          # Only the leader reports Ready, so the Service has one endpoint.
           readinessProbe:
-            tcpSocket:
-              port: 9002
+            grpc:
+              port: 9003
+              service: readiness
+          livenessProbe:
+            grpc:
+              port: 9003
+              service: liveness
           volumeMounts:
             - name: config
               mountPath: /etc/epp
@@ -133,6 +146,23 @@ spec:
         - name: tls
           secret:
             secretName: maas-epp-tls
+---
+# Only the leader is Ready, so a voluntary eviction of it would leave no
+# picker. The unready standby may still be evicted.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: maas-epp
+  namespace: "{{ maas_namespace }}"
+  labels:
+    app.kubernetes.io/part-of: maas-test
+    app: maas-epp
+spec:
+  minAvailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      app: maas-epp
 ---
 # The service CA writes a certificate for maas-epp.{{ maas_namespace }}.svc into the
 # maas-epp-tls Secret.

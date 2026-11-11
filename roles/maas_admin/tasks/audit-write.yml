@@ -1,0 +1,27 @@
+# Assisted by Claude Opus
+# Appends one row to the audit table for an admin action. psql variables are
+# interpolated in a script read from stdin, not in -c commands; the values are
+# separate argv elements, so nothing is re-quoted through a shell.
+- name: Record the admin action
+  ansible.builtin.command:
+    argv:
+      - oc
+      - exec
+      - -n
+      - "{{ maas_namespace }}"
+      - maas-db-0
+      - -c
+      - postgres
+      - --
+      - bash
+      - -c
+      - |
+        psql -d maas -v ON_ERROR_STOP=1 -v actor="$1" -v action="$2" -v target="$3" -v details="$4" <<"SQL"
+        INSERT INTO audit (actor, action, target, details) VALUES (:'actor', :'action', :'target', :'details'::jsonb);
+        SQL
+      - bash
+      - "{{ _maas_actor }}"
+      - "{{ _maas_action }}"
+      - "{{ _maas_target | default('') }}"
+      - "{{ _maas_details | default({}) | to_json }}"
+  changed_when: false

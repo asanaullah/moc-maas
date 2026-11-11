@@ -1,0 +1,21 @@
+# Assisted by Claude Opus
+# The subscriptions playbooks/sync.yml manages. limits is one or more
+# <limit>/<window> pairs. Omit models to serve every model; omit users to keep
+# any direct users the subscription already has. The first group is the one a
+# user from users.yaml is added to.
+#
+# The real set lives in sync/local/subscriptions.yaml (gitignored); this
+# tracked file is the default and matches the TUI's three stress profiles.
+subscriptions:
+  - name: tui-chat
+    groups: [tui-chat]
+    limits: 10000/60s
+    priority: 30
+  - name: tui-tool-call
+    groups: [tui-tool-call]
+    limits: 100000/60s
+    priority: 20
+  - name: tui-research
+    groups: [tui-research]
+    limits: 30000/60s
+    priority: 10

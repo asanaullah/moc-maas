@@ -1,0 +1,8 @@
+# Assisted by Claude Opus
+# The directory holding subscriptions.yaml and users.yaml. The tracked files
+# are the defaults; the real set lives in sync/local/ (gitignored).
+maas_sync_dir: "{{ playbook_dir | dirname }}/sync"
+# Check by default. Set maas_sync_apply=true to make changes.
+maas_sync_apply: false
+# Removals are off unless asked for.
+maas_sync_prune: false

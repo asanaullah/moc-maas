@@ -1,0 +1,39 @@
+# Assisted by Claude Opus
+# Creates the three fixed stress subscriptions maas-tui.py uses.
+- name: Read the governance data
+  ansible.builtin.include_tasks: governance-read.yml
+
+- name: Create the stress subscriptions
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ role_path }}/files/governance_edit.py"
+      - --file
+      - "{{ _maas_gov_file.path }}"
+      - subscription-set
+      - --name
+      - "{{ item.name }}"
+      - --namespace
+      - "{{ maas_namespace }}"
+      - --groups
+      - "{{ item.name }}"
+      - --priority
+      - "{{ item.priority }}"
+      - --limits
+      - "{{ item.limits }}"
+  loop:
+    - {name: tui-chat, priority: 30, limits: "10000/60s"}
+    - {name: tui-tool-call, priority: 20, limits: "100000/60s"}
+    - {name: tui-research, priority: 10, limits: "30000/60s"}
+  loop_control:
+    label: "{{ item.name }}"
+  changed_when: true
+
+- name: Save and re-render
+  ansible.builtin.include_tasks: governance-save.yml
+
+- name: Record the action
+  ansible.builtin.include_tasks: audit-write.yml
+  vars:
+    _maas_target: tui-subscriptions
+    _maas_details: {}

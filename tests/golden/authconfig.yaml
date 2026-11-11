@@ -1,0 +1,224 @@
+apiVersion: authorino.kuadrant.io/v1beta3
+kind: AuthConfig
+metadata:
+  name: maas-gateway-auth
+  namespace: parity-ns
+  labels:
+    maas.moc/managed: 'true'
+spec:
+  hosts:
+  - maas-gateway-auth
+  authentication:
+    api-keys:
+      plain:
+        selector: request.headers.authorization
+      when:
+      - selector: request.headers.authorization
+        operator: matches
+        value: ^Bearer sk-oai-.*
+      metrics: false
+      priority: 0
+    oidc-identities:
+      jwt:
+        issuerUrl: https://maas-sso-parity-ns.apps.example.com/realms/maas
+        ttl: 300
+      when:
+      - predicate: '!request.headers.authorization.startsWith("Bearer sk-oai-") && request.headers.authorization.matches("^Bearer [^.]+\\.[^.]+\\.[^.]+$")'
+      metrics: false
+      priority: 1
+  metadata:
+    apiKeyValidation:
+      when:
+      - predicate: request.headers.authorization.matches("^Bearer sk-oai-.*")
+      http:
+        url: http://127.0.0.1:8090/internal/v1/api-keys/validate
+        contentType: application/json
+        method: POST
+        body:
+          expression: '{"key": request.headers.authorization.replace("Bearer ", "")}'
+      cache:
+        key:
+          selector: request.headers.authorization.replace("Bearer ", "")
+        ttl: 60
+      metrics: false
+      priority: 0
+    subscription-info:
+      when:
+      - predicate: (size(request.path.split("/").filter(x, x != "")) >= 2 && request.path.split("/").filter(x, x != "")[0] != "v1" && request.path.split("/").filter(x, x != "")[0] != "maas-api" && request.path.split("/").filter(x, x != "")[0] != "maas-usage" || "x-gateway-model-name" in request.headers)
+      http:
+        url: http://127.0.0.1:8090/internal/v1/subscriptions/select
+        contentType: application/json
+        method: POST
+        body:
+          expression: "{\n  \"groups\": (has(auth.metadata) && has(auth.metadata.apiKeyValidation)) ? auth.metadata.apiKeyValidation.groups : (has(auth.identity.groups) ? auth.identity.groups : auth.identity.user.groups),\n  \"username\": (has(auth.metadata) && has(auth.metadata.apiKeyValidation)) ? auth.metadata.apiKeyValidation.username : (has(auth.identity.preferred_username) ? auth.identity.preferred_username : (has(auth.identity.sub) ? auth.identity.sub : auth.identity.user.username)),\n  \"requestedSubscription\": (has(auth.metadata) && has(auth.metadata.apiKeyValidation)) ? auth.metadata.apiKeyValidation.subscription : (\"x-maas-subscription\" in request.headers ? request.headers[\"x-maas-subscription\"] : \"\"),\n  \"requestedModel\": (size(request.path.split(\"/\").filter(x, x != \"\")) >= 2 && request.path.split(\"/\").filter(x, x != \"\")[0] != \"v1\" && request.path.split(\"/\").filter(x, x != \"\")[0] != \"maas-api\" && request.path.split(\"/\").filter(x, x != \"\")[0] != \"maas-usage\" ? request.path.split(\"/\").filter(x, x != \"\")[0] + \"/\" + request.path.split(\"/\").filter(x, x != \"\")[1] : (\"x-gateway-model-name\" in request.headers   ? request.headers[\"x-gateway-model-name\"]   : \"\"))\n}"
+      cache:
+        key:
+          selector: '((has(auth.metadata) && has(auth.metadata.apiKeyValidation)) ? auth.metadata.apiKeyValidation.userId : (has(auth.identity.preferred_username) ? auth.identity.preferred_username : (has(auth.identity.sub) ? auth.identity.sub : auth.identity.user.username))) + "|" + ((has(auth.metadata) && has(auth.metadata.apiKeyValidation)) ? auth.metadata.apiKeyValidation.groups : (has(auth.identity.groups) ? auth.identity.groups : auth.identity.user.groups)).join(",") + "|" + ((has(auth.metadata) && has(auth.metadata.apiKeyValidation)) ? auth.metadata.apiKeyValidation.subscription : ("x-maas-subscription" in request.headers ? request.headers["x-maas-subscription"] : "")) + "|" + (size(request.path.split("/").filter(x, x != "")) >= 2 && request.path.split("/").filter(x, x != "")[0] != "v1" && request.path.split("/").filter(x, x != "")[0] != "maas-api" && request.path.split("/").filter(x, x != "")[0] != "maas-usage" ? request.path.split("/").filter(x, x != "")[0] + "/" + request.path.split("/").filter(x, x != "")[1] : ("x-gateway-model-name" in request.headers   ? request.headers["x-gateway-model-name"]   : ""))'
+        ttl: 60
+      metrics: false
+      priority: 1
+  authorization:
+    tenant-gateway-isolation:
+      priority: 0
+      metrics: false
+      opa:
+        rego: '# Tenant hostname isolation stub.
+
+          # Replace with a real maas-api call to validate that the API key''s tenant
+
+          # matches the gateway hostname (prevents Coke key on Pepsi gateway).
+
+          allow { true }'
+        version: v0
+    auth-valid:
+      metrics: false
+      priority: 0
+      opa:
+        rego: "allow {\n  object.get(input.auth.metadata, \"apiKeyValidation\", {})\n  input.auth.metadata.apiKeyValidation.valid == true\n}\nallow {\n  not input.auth.metadata.apiKeyValidation\n}"
+        version: v0
+      cache:
+        key:
+          selector: '"api-key|" + (request.headers.authorization.replace("Bearer ", "")) + "|" + (size(request.path.split("/").filter(x, x != "")) >= 2 && request.path.split("/").filter(x, x != "")[0] != "v1" && request.path.split("/").filter(x, x != "")[0] != "maas-api" && request.path.split("/").filter(x, x != "")[0] != "maas-usage" ? request.path.split("/").filter(x, x != "")[0] + "/" + request.path.split("/").filter(x, x != "")[1] : ("x-gateway-model-name" in request.headers   ? request.headers["x-gateway-model-name"]   : ""))'
+        ttl: 60
+    subscription-valid:
+      when:
+      - predicate: (size(request.path.split("/").filter(x, x != "")) >= 2 && request.path.split("/").filter(x, x != "")[0] != "v1" && request.path.split("/").filter(x, x != "")[0] != "maas-api" && request.path.split("/").filter(x, x != "")[0] != "maas-usage" || "x-gateway-model-name" in request.headers)
+      metrics: false
+      priority: 0
+      opa:
+        rego: "allow {\n\tobject.get(input.auth.metadata[\"subscription-info\"], \"name\", \"\") != \"\"\n\tobject.get(input.auth.metadata[\"subscription-info\"], \"error\", \"\") == \"\"\n\tphase := object.get(input.auth.metadata[\"subscription-info\"], \"phase\", \"\")\n\tany([phase == \"Active\", phase == \"Degraded\"])\n\tobject.get(input.auth.metadata[\"subscription-info\"], \"deletionTimestamp\", \"\") == \"\"\n}"
+        version: v0
+      cache:
+        key:
+          selector: '((has(auth.metadata) && has(auth.metadata.apiKeyValidation)) ? auth.metadata.apiKeyValidation.userId : (has(auth.identity.preferred_username) ? auth.identity.preferred_username : (has(auth.identity.sub) ? auth.identity.sub : auth.identity.user.username))) + "|" + ((has(auth.metadata) && has(auth.metadata.apiKeyValidation)) ? auth.metadata.apiKeyValidation.groups : (has(auth.identity.groups) ? auth.identity.groups : auth.identity.user.groups)).join(",") + "|" + ((has(auth.metadata) && has(auth.metadata.apiKeyValidation)) ? auth.metadata.apiKeyValidation.subscription : ("x-maas-subscription" in request.headers ? request.headers["x-maas-subscription"] : "")) + "|" + (size(request.path.split("/").filter(x, x != "")) >= 2 && request.path.split("/").filter(x, x != "")[0] != "v1" && request.path.split("/").filter(x, x != "")[0] != "maas-api" && request.path.split("/").filter(x, x != "")[0] != "maas-usage" ? request.path.split("/").filter(x, x != "")[0] + "/" + request.path.split("/").filter(x, x != "")[1] : ("x-gateway-model-name" in request.headers   ? request.headers["x-gateway-model-name"]   : ""))'
+        ttl: 60
+    require-group-membership:
+      metrics: false
+      priority: 0
+      opa:
+        rego: "\nmodel_access := {\"parity-ns/maas-sim\":{\"groups\":[\"maas-free\",\"maas-standard\"],\"users\":[]},\"publishers/parity-ns/models/maas-sim\":{\"groups\":[\"maas-free\",\"maas-standard\"],\"users\":[]}}\n\nrequest_path := object.get(input.context.request.http, \"path\", \"\")\nrequest_headers := object.get(input.context.request.http, \"headers\", {})\n\npath_parts := [p | p := split(request_path, \"/\")[_]; p != \"\"]\n\npath_model_identity := sprintf(\"%s/%s\", [path_parts[0], path_parts[1]]) {\n\tcount(path_parts) >= 2\n\tpath_parts[0] != \"v1\"\n\tpath_parts[0] != \"maas-api\"\n\tpath_parts[0] != \"maas-usage\"\n}\n\nheader_model_identity := object.get(request_headers, \"x-gateway-model-name\", \"\")\n\nmodel_identity := path_model_identity {\n\tpath_model_identity != \"\"\n} else := header_model_identity {\n\theader_model_identity != \"\"\n} else := \"\"\n\nusername := input.auth.metadata.apiKeyValidation.username\n\t{ object.get(input.auth, \"metadata\", {}).apiKeyValidation.username != \"\" }\nelse := input.auth.identity.preferred_username\n\t{ object.get(input.auth, \"identity\", {}).preferred_username != \"\" }\nelse := input.auth.identity.sub\n\t{ object.get(input.auth, \"identity\", {}).sub != \"\" }\nelse := input.auth.identity.user.username\n\t{ object.get(input.auth, \"identity\", {}).user.username != \"\" }\nelse := \"\"\n\ngroups := input.auth.metadata.apiKeyValidation.groups\n\t{ object.get(input.auth, \"metadata\", {}).apiKeyValidation.groups != [] }\nelse := input.auth.identity.groups\n\t{ object.get(input.auth, \"identity\", {}).groups != [] }\nelse := input.auth.identity.user.groups\n\t{ object.get(input.auth, \"identity\", {}).user.groups != [] }\nelse := []\n\nmodel_rules := object.get(model_access, model_identity, null)\n\n# Management endpoints (e.g. /v1/models, /maas-api/v1/api-keys) carry no model context.\n# Allow them here; subscription and rate-limit checks are gated by model-route conditions.\nallow {\n\tmodel_identity == \"\"\n}\n\n# Inference path: deny by default when no MaaSAuthPolicy covers this model.\n# Allow only when the caller's username or a group is explicitly listed.\nallow {\n\tmodel_rules != null\n\tmodel_rules.users[_] == username\n}\n\nallow {\n\tmodel_rules != null\n\tg := groups[_]\n\tmodel_rules.groups[_] == g\n}\n"
+        version: v0
+      cache:
+        key:
+          selector: '((has(auth.metadata) && has(auth.metadata.apiKeyValidation)) ? auth.metadata.apiKeyValidation.userId : (has(auth.identity.preferred_username) ? auth.identity.preferred_username : (has(auth.identity.sub) ? auth.identity.sub : auth.identity.user.username))) + "|" + ((has(auth.metadata) && has(auth.metadata.apiKeyValidation)) ? auth.metadata.apiKeyValidation.groups : (has(auth.identity.groups) ? auth.identity.groups : auth.identity.user.groups)).join(",") + "|" + (size(request.path.split("/").filter(x, x != "")) >= 2 && request.path.split("/").filter(x, x != "")[0] != "v1" && request.path.split("/").filter(x, x != "")[0] != "maas-api" && request.path.split("/").filter(x, x != "")[0] != "maas-usage" ? request.path.split("/").filter(x, x != "")[0] + "/" + request.path.split("/").filter(x, x != "")[1] : ("x-gateway-model-name" in request.headers   ? request.headers["x-gateway-model-name"]   : ""))'
+        ttl: 60
+    oidc-groups-safe:
+      when:
+      - predicate: '!request.headers.authorization.startsWith("Bearer sk-oai-") && has(auth.identity.groups) && size(auth.identity.groups) > 0'
+      metrics: false
+      priority: 0
+      opa:
+        rego: "unsafe_group[g] {\n\tg := input.auth.identity.groups[_]\n\tnot regex.match(\"^[A-Za-z0-9:._/-]+$\", g)\n}\n\nallow {\n\tcount(unsafe_group) == 0\n}"
+        version: v0
+    oidc-client-bound:
+      when:
+      - predicate: '!request.headers.authorization.startsWith("Bearer sk-oai-") && request.headers.authorization.matches("^Bearer [^.]+\\.[^.]+\\.[^.]+$") && has(auth.identity.azp)'
+      metrics: false
+      priority: 1
+      patternMatching:
+        patterns:
+        - selector: auth.identity.azp
+          operator: eq
+          value: maas-oidc
+    no-reserved-admin-group:
+      metrics: false
+      priority: 0
+      patternMatching:
+        patterns:
+        - predicate: '!(has(auth.identity.groups) && auth.identity.groups.exists(g, g == "maas-local-admin"))'
+  response:
+    success:
+      headers:
+        X-MaaS-Username:
+          when:
+          - predicate: request.headers.authorization.matches("^Bearer sk-oai-.*")
+          plain:
+            selector: auth.metadata.apiKeyValidation.username
+          metrics: false
+          priority: 0
+        X-MaaS-Username-Token:
+          when:
+          - predicate: '!request.headers.authorization.startsWith("Bearer sk-oai-")'
+          plain:
+            expression: 'has(auth.identity.preferred_username) ? auth.identity.preferred_username : (has(auth.identity.sub) ? auth.identity.sub : auth.identity.user.username)'
+          key: X-MaaS-Username
+          metrics: false
+          priority: 1
+        X-Auth-User:
+          when:
+          - predicate: request.headers.authorization.matches("^Bearer sk-oai-.*")
+          plain:
+            selector: auth.metadata.apiKeyValidation.username
+          metrics: false
+          priority: 0
+        X-Auth-User-Token:
+          when:
+          - predicate: '!request.headers.authorization.startsWith("Bearer sk-oai-")'
+          plain:
+            expression: 'has(auth.identity.preferred_username) ? auth.identity.preferred_username : (has(auth.identity.sub) ? auth.identity.sub : auth.identity.user.username)'
+          key: X-Auth-User
+          metrics: false
+          priority: 1
+        X-MaaS-Group:
+          when:
+          - predicate: request.headers.authorization.matches("^Bearer sk-oai-.*")
+          plain:
+            expression: 'size(auth.metadata.apiKeyValidation.groups) > 0 ? ''["'' + auth.metadata.apiKeyValidation.groups.join(''","'') + ''"]'' : ''[]'''
+          metrics: false
+          priority: 0
+        X-MaaS-Group-Token:
+          when:
+          - predicate: '!request.headers.authorization.startsWith("Bearer sk-oai-")'
+          plain:
+            expression: 'has(auth.identity.groups) ? (size(auth.identity.groups) > 0 && auth.identity.groups.all(g, g.matches(''^[A-Za-z0-9:._/-]+$'')) ? ''["system:authenticated","'' + auth.identity.groups.join(''","'') + ''"]'' : ''["system:authenticated"]'') : (has(auth.identity.user.groups) && size(auth.identity.user.groups) > 0 ? ''["system:authenticated","'' + auth.identity.user.groups.join(''","'') + ''"]'' : ''["system:authenticated"]'')'
+          key: X-MaaS-Group
+          metrics: false
+          priority: 1
+        X-MaaS-Subscription:
+          when:
+          - predicate: (has(auth.metadata) && has(auth.metadata.apiKeyValidation) && auth.metadata.apiKeyValidation.subscription != "") || "x-maas-subscription" in request.headers
+          plain:
+            expression: '(has(auth.metadata) && has(auth.metadata.apiKeyValidation)) ? auth.metadata.apiKeyValidation.subscription : ("x-maas-subscription" in request.headers ? request.headers["x-maas-subscription"] : "")'
+          metrics: false
+          priority: 0
+      dynamicMetadata:
+        identity:
+          when:
+          - predicate: (size(request.path.split("/").filter(x, x != "")) >= 2 && request.path.split("/").filter(x, x != "")[0] != "v1" && request.path.split("/").filter(x, x != "")[0] != "maas-api" && request.path.split("/").filter(x, x != "")[0] != "maas-usage" || "x-gateway-model-name" in request.headers)
+          json:
+            properties:
+              groups:
+                expression: '(has(auth.metadata) && has(auth.metadata.apiKeyValidation)) ? auth.metadata.apiKeyValidation.groups : (has(auth.identity.groups) ? auth.identity.groups : auth.identity.user.groups)'
+              groups_str:
+                expression: '((has(auth.metadata) && has(auth.metadata.apiKeyValidation)) ? auth.metadata.apiKeyValidation.groups : (has(auth.identity.groups) ? auth.identity.groups : auth.identity.user.groups)).join(",")'
+              userid:
+                expression: '(has(auth.metadata) && has(auth.metadata.apiKeyValidation)) ? auth.metadata.apiKeyValidation.username : (has(auth.identity.preferred_username) ? auth.identity.preferred_username : (has(auth.identity.sub) ? auth.identity.sub : auth.identity.user.username))'
+              keyId:
+                expression: '(has(auth.metadata) && has(auth.metadata.apiKeyValidation)) ? auth.metadata.apiKeyValidation.keyId : ""'
+              keyName:
+                expression: '(has(auth.metadata) && has(auth.metadata.apiKeyValidation)) ? auth.metadata.apiKeyValidation.keyName : ""'
+              selected_subscription:
+                expression: 'has(auth.metadata["subscription-info"].name) ? auth.metadata["subscription-info"].name : ""'
+              selected_subscription_key:
+                expression: '(has(auth.metadata["subscription-info"].namespace) && has(auth.metadata["subscription-info"].name)) ? auth.metadata["subscription-info"].namespace + "/" + auth.metadata["subscription-info"].name + "@" + (has(auth.metadata["subscription-info"].resolvedModel) && auth.metadata["subscription-info"].resolvedModel != "" ? auth.metadata["subscription-info"].resolvedModel : (size(request.path.split("/").filter(x, x != "")) >= 2 && request.path.split("/").filter(x, x != "")[0] != "v1" && request.path.split("/").filter(x, x != "")[0] != "maas-api" && request.path.split("/").filter(x, x != "")[0] != "maas-usage" ? request.path.split("/").filter(x, x != "")[0] + "/" + request.path.split("/").filter(x, x != "")[1] : ("x-gateway-model-name" in request.headers   ? request.headers["x-gateway-model-name"]   : ""))) : ""'
+              subscription_info:
+                expression: 'has(auth.metadata["subscription-info"].name) ? auth.metadata["subscription-info"] : {}'
+              subscription_error:
+                expression: 'has(auth.metadata["subscription-info"].error) ? auth.metadata["subscription-info"].error : ""'
+              subscription_error_message:
+                expression: 'has(auth.metadata["subscription-info"].message) ? auth.metadata["subscription-info"].message : ""'
+          metrics: true
+          priority: 0
+    unauthenticated:
+      code: 401
+      message:
+        value: Authentication required
+    unauthorized:
+      code: 403
+      body:
+        expression: 'has(auth.metadata["subscription-info"].message) ? auth.metadata["subscription-info"].message : "Access denied"'
+      headers:
+        x-ext-auth-reason:
+          expression: 'has(auth.metadata["subscription-info"].error) ? auth.metadata["subscription-info"].error : "unauthorized"'
+        content-type:
+          value: text/plain

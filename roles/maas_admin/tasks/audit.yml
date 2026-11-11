@@ -1,5 +1,27 @@
 # Assisted by Claude Opus
-- name: List the audit trail
-  ansible.builtin.include_tasks: get-list.yml
-  vars:
-    _maas_path: /api/audit
+# Reads the audit trail, newest first.
+- name: Read the audit rows
+  ansible.builtin.command:
+    argv:
+      - oc
+      - exec
+      - -n
+      - "{{ maas_namespace }}"
+      - maas-db-0
+      - -c
+      - postgres
+      - --
+      - bash
+      - -c
+      - |
+        psql -d maas -v ON_ERROR_STOP=1 -v since="$1" -At <<"SQL"
+        SELECT at, actor, action, target, details FROM audit WHERE at >= :'since'::timestamptz ORDER BY at DESC LIMIT 50;
+        SQL
+      - bash
+      - "{{ maas_since | default('1970-01-01') }}"
+  register: _maas_audit
+  changed_when: false
+
+- name: Report
+  ansible.builtin.debug:
+    msg: "{{ _maas_audit.stdout_lines }}"
