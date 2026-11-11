@@ -36,3 +36,9 @@
     name: maas_sso_admin
   vars:
     maas_action: sync
+
+- name: Register the OIDC client
+  ansible.builtin.include_role:
+    name: maas_sso_admin
+  vars:
+    maas_action: oidc-client

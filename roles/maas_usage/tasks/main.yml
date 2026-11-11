@@ -1,11 +1,26 @@
 # Assisted by Claude Opus
 # The dashboard's OIDC client in Keycloak (realm maas), redirecting
-# to the dashboard's Route host, then the dashboard itself.
+# to the dashboard's Route host, the page's code, and the dashboard itself.
 - name: Register the dashboard with Keycloak
   ansible.builtin.include_role:
     name: maas_sso_admin
   vars:
     maas_action: usage-client
+
+- name: Apply the page code ConfigMap
+  kubernetes.core.k8s:
+    state: present
+    apply: true
+    namespace: "{{ maas_namespace }}"
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: maas-portal-code
+        labels:
+          app.kubernetes.io/part-of: "{{ maas_part_of }}"
+      data:
+        portal.py: "{{ lookup('ansible.builtin.file', role_path ~ '/files/portal.py') }}"
 
 - name: Apply the user dashboard
   ansible.builtin.include_role:
@@ -20,7 +35,7 @@
     tasks_from: restart_deployments
   vars:
     deployments: [maas-usage]
-    configmaps: [maas-portal-code]
+    configmaps: [maas-portal-code, maas-usage-governance]
 
 - name: Wait for the dashboard
   ansible.builtin.include_role:

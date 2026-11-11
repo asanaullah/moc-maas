@@ -1,125 +1,119 @@
 # Assisted by Claude Opus
-# The plan's cross-cutting smoke test: mint a short-lived service key on a
-# dedicated tiny plan, check every expected answer through the public Route
-# (files/smoke.py), then revoke the key and delete the plan. A rerun within
-# one budget window (60s) of the last charged request can see the leftover
-# budget and fail the first check; wait a minute and run it again.
-- name: List the keys
-  ansible.builtin.include_role:
-    name: maas_admin
-  vars:
-    maas_admin_action: api
-    maas_api_method: GET
-    maas_api_path: /api/keys
-    maas_api_body: {}
-
-- name: Revoke smoke keys left by an earlier failed run
-  ansible.builtin.include_role:
-    name: maas_admin
-  vars:
-    maas_admin_action: api
-    maas_api_method: POST
-    maas_api_path: /api/keys/revoke
-    maas_api_body: {"id": "{{ item.id }}"}
-  loop: "{{ maas_api_response.stdout | from_json
-            | selectattr('kind', 'equalto', 'service')
-            | selectattr('plan', 'equalto', 'smoke-test')
-            | selectattr('revoked', 'none') | list }}"
-  loop_control:
-    label: "{{ item.id }}"
-
-- name: Create the tiny plan the smoke key runs on
-  ansible.builtin.include_role:
-    name: maas_admin
-  vars:
-    maas_admin_action: api
-    maas_api_method: POST
-    maas_api_path: /api/plans
-    maas_api_body: {"name": "smoke-test", "tokens": 128, "window": 60, "days": 1, "models": ["maas-sim"]}
-
-- name: Wait until Limitador has loaded the plan's limit
-  kubernetes.core.k8s_exec:
-    namespace: "{{ maas_namespace }}"
-    pod: "{{ _maas_pod }}"
-    command: python3 -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:9100/metrics', timeout=3).read().decode())"
-  register: _maas_smoke_limits
-  until: _maas_smoke_limits.stdout is search('maas_plan_limit_loaded\{plan="smoke-test"\} 1')
-  retries: 24
-  delay: 5
-  changed_when: false
-
-- name: Mint the smoke key
-  ansible.builtin.include_role:
-    name: maas_admin
-  vars:
-    maas_admin_action: api
-    maas_api_method: POST
-    maas_api_path: /api/service-keys
-    maas_api_body: {"owner": "smoke-test", "name": "smoke", "plan": "smoke-test", "days": 1}
-
-- name: Remember the key and its id
+# The cross-cutting smoke test: a Keycloak user and group, a small
+# subscription, the checks in files/smoke.py through the public Route, then
+# the user, group and subscription removed.
+- name: Make a password for the smoke user
   ansible.builtin.set_fact:
-    _maas_smoke_key: "{{ (maas_api_response.stdout | from_json).key }}"
-    _maas_smoke_id: "{{ (maas_api_response.stdout | from_json).id }}"
+    _maas_smoke_password: "{{ lookup('ansible.builtin.password', '/dev/null', length=24, chars='abcdef0123456789') }}"
   no_log: true
 
-# The key is passed in the environment, which Ansible doesn't print; the
-# command line and the check lines carry no key material.
-- name: Run the checks
-  ansible.builtin.command:
-    argv:
-      - "{{ ansible_playbook_python }}"
-      - "{{ role_path }}/files/smoke.py"
-      - "https://{{ maas_gateway_host }}"
-  environment:
-    MOC_MAAS_KEY: "{{ _maas_smoke_key }}"
-  register: _maas_smoke
-  changed_when: false
-  failed_when: false
+- name: Run the smoke test
+  block:
+    - name: Create the smoke group
+      ansible.builtin.include_role:
+        name: maas_sso_admin
+      vars:
+        maas_action: group-create
+        maas_group: maas-smoke
 
-- name: Revoke the smoke key
-  ansible.builtin.include_role:
-    name: maas_admin
-  vars:
-    maas_admin_action: api
-    maas_api_method: POST
-    maas_api_path: /api/keys/revoke
-    maas_api_body: {"id": "{{ _maas_smoke_id }}"}
+    - name: Create the smoke user
+      ansible.builtin.include_role:
+        name: maas_sso_admin
+      vars:
+        maas_action: user-create
+        maas_user: maas-smoke
+        maas_group: maas-smoke
+        maas_password: "{{ _maas_smoke_password }}"
 
-- name: Check the revoked key no longer works
-  ansible.builtin.uri:
-    url: "{{ maas_gateway_url }}"
-    method: POST
-    headers:
-      Authorization: "Bearer {{ _maas_smoke_key }}"
-    body: {"model": "maas-sim", "max_tokens": 8, "messages": []}
-    body_format: json
-    status_code: [200, 401, 403, 429]
-    validate_certs: false
-  register: _maas_smoke_revoked
-  no_log: true
-  failed_when: _maas_smoke_revoked.status != 401
+    - name: Give the smoke group a subscription
+      ansible.builtin.include_role:
+        name: maas_admin
+      vars:
+        maas_action: subscription-set
+        maas_subscription: smoke-test
+        maas_groups: maas-smoke
+        maas_limits: 200/60s
+        maas_priority: 50
 
-- name: Delete the smoke plan
-  ansible.builtin.include_role:
-    name: maas_admin
-  vars:
-    maas_admin_action: api
-    maas_api_method: POST
-    maas_api_path: /api/plans/delete
-    maas_api_body: {"name": "smoke-test"}
+    - name: Wait until the private API server has the subscription
+      ansible.builtin.command:
+        argv:
+          - oc
+          - exec
+          - -n
+          - "{{ maas_namespace }}"
+          - deploy/maas-kube
+          - -c
+          - seeder
+          - --
+          - oc
+          - --kubeconfig
+          - /kubeconfig/kubeconfig
+          - get
+          - maassubscriptions.maas.opendatahub.io
+          - smoke-test
+          - -n
+          - "{{ maas_namespace }}"
+          - -o
+          - jsonpath={.status.phase}
+      register: _maas_smoke_sub
+      until: _maas_smoke_sub.stdout | trim == 'Active'
+      retries: 30
+      delay: 5
+      changed_when: false
 
-- name: Forget the key
-  ansible.builtin.set_fact:
-    _maas_smoke_key: ""
-    _maas_smoke_id: ""
+    - name: Run the checks
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ role_path }}/files/smoke.py"
+          - "https://{{ maas_gateway_host }}"
+          - "https://{{ maas_sso_host }}/realms/maas"
+          - "publishers/{{ maas_namespace }}/models/maas-sim"
+      environment:
+        SMOKE_USER: maas-smoke
+        SMOKE_PASSWORD: "{{ _maas_smoke_password }}"
+        SMOKE_CLIENT: "{{ maas_oidc_client_id }}"
+        CACHE_TTL: "{{ maas_cache_ttl }}"
+      register: _maas_smoke
+      changed_when: false
+      failed_when: false
 
-- name: Report the checks
-  ansible.builtin.debug:
-    msg: "{{ _maas_smoke.stdout_lines }}"
+    - name: Report the checks
+      ansible.builtin.debug:
+        msg: "{{ _maas_smoke.stdout_lines + (_maas_smoke.stderr_lines | default([])) }}"
 
-- name: Fail if any check failed
-  ansible.builtin.assert:
-    that: _maas_smoke.rc == 0
-    fail_msg: "{{ _maas_smoke.stdout }}"
-    quiet: true
+    - name: Fail if any check failed
+      ansible.builtin.assert:
+        that: _maas_smoke.rc == 0
+        fail_msg: "{{ _maas_smoke.stdout }}{{ _maas_smoke.stderr | default('') }}"
+        quiet: true
+  always:
+    - name: Remove the smoke subscription
+      ansible.builtin.include_role:
+        name: maas_admin
+      vars:
+        maas_action: subscription-delete
+        maas_subscription: smoke-test
+      ignore_errors: true
+
+    - name: Remove the smoke user
+      ansible.builtin.include_role:
+        name: maas_sso_admin
+      vars:
+        maas_action: user-delete
+        maas_user: maas-smoke
+      ignore_errors: true
+
+    - name: Remove the smoke group
+      ansible.builtin.include_role:
+        name: maas_sso_admin
+      vars:
+        maas_action: group-delete
+        maas_group: maas-smoke
+      ignore_errors: true
+
+    - name: Forget the password
+      ansible.builtin.set_fact:
+        _maas_smoke_password: ""
+      no_log: true

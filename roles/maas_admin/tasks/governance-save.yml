@@ -1,0 +1,34 @@
+# Assisted by Claude Opus
+# Saves the edited governance file and re-renders everything that reads it.
+- name: Read the edited objects
+  ansible.builtin.slurp:
+    src: "{{ _maas_gov_file.path }}"
+  register: _maas_gov_new
+
+- name: Remove the temporary governance file
+  ansible.builtin.file:
+    state: absent
+    path: "{{ _maas_gov_file.path }}"
+
+- name: Save the governance ConfigMap
+  kubernetes.core.k8s:
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: maas-governance
+        namespace: "{{ maas_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: "{{ maas_part_of }}"
+      data:
+        objects.yaml: "{{ _maas_gov_new.content | b64decode }}"
+
+- name: Re-render the governance data
+  ansible.builtin.include_role:
+    name: maas_governance
+
+- name: Restart the gateway onto the new configuration
+  ansible.builtin.include_role:
+    name: maas_gateway

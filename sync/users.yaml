@@ -1,0 +1,14 @@
+# Assisted by Claude Opus
+# The users playbooks/sync.yml manages. Each user is added to the first group
+# of their subscription. The user must have signed in once, so Keycloak knows
+# the email; until then the sync reports them as pending.
+#
+# The TUI's simulated users are per-session identities, not Keycloak accounts,
+# so this tracked default is empty. Put the real set in
+# sync/local/users.yaml (gitignored).
+users: []
+#
+# Example:
+# users:
+#   - email: ada@example.com
+#     subscription: tui-chat

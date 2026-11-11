@@ -1,0 +1,21 @@
+# Assisted by Claude Opus
+- name: Check the arguments
+  ansible.builtin.assert:
+    that:
+      - maas_group is defined
+      - maas_group is match('^[A-Za-z0-9:._-]+$')
+    fail_msg: set maas_group
+    quiet: true
+
+- name: Delete the group
+  kubernetes.core.k8s_exec:
+    namespace: "{{ maas_namespace }}"
+    pod: "{{ _maas_pod }}"
+    container: keycloak
+    command: "bash /tmp/maas-kcadm.sh group-delete {{ maas_group }}"
+  register: _maas_kcadm
+  failed_when: _maas_kcadm.rc != 0 and 'no group' not in _maas_kcadm.stderr
+
+- name: Report
+  ansible.builtin.debug:
+    msg: "{{ _maas_kcadm.stdout_lines }}"

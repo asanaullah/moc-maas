@@ -1,11 +1,11 @@
 # The MaaS's own identity provider: Red Hat build of Keycloak, realm
 # "maas", where users sign in with GitHub. Namespace members manage users and
-# groups in Keycloak's admin console and map groups to plans in the MaaS admin
-# portal.
+# groups in Keycloak's admin console and map groups to subscriptions with
+# playbooks/admin.yml.
 #
 # Needs these Secrets in {{ maas_namespace }}:
-#   maas-sso-db, maas-sso-admin, maas-portal-oidc, maas-usage-oidc  (deploy.yml)
-#   maas-sso-github                                 (deploy.yml or github-secret.yml)
+#   maas-sso-db, maas-sso-admin, maas-usage-oidc  (deploy.yml)
+#   maas-sso-github                               (deploy.yml or github-secret.yml)
 #
 # Keycloak's admin console is never exposed: an Envoy sidecar in each pod is
 # the only thing the Route reaches, and it forwards /realms/maas/ and
@@ -69,44 +69,7 @@ data:
           }
         }
       ],
-      "clients": [
-        {
-          "clientId": "maas-portal",
-          "name": "MaaS key portal",
-          "protocol": "openid-connect",
-          "enabled": true,
-          "publicClient": false,
-          "clientAuthenticatorType": "client-secret",
-          "secret": "${PORTAL_CLIENT_SECRET}",
-          "standardFlowEnabled": true,
-          "implicitFlowEnabled": false,
-          "directAccessGrantsEnabled": false,
-          "serviceAccountsEnabled": false,
-          "consentRequired": false,
-          "fullScopeAllowed": false,
-          "frontchannelLogout": false,
-          "redirectUris": ["https://maas-keys-{{ maas_namespace }}.{{ maas_apps_domain }}/callback"],
-          "webOrigins": [],
-          "attributes": {
-            "pkce.code.challenge.method": "S256",
-            "post.logout.redirect.uris": "https://maas-keys-{{ maas_namespace }}.{{ maas_apps_domain }}/"
-          },
-          "protocolMappers": [
-            {
-              "name": "groups",
-              "protocol": "openid-connect",
-              "protocolMapper": "oidc-group-membership-mapper",
-              "config": {
-                "claim.name": "groups",
-                "full.path": "false",
-                "id.token.claim": "true",
-                "access.token.claim": "false",
-                "userinfo.token.claim": "true"
-              }
-            }
-          ]
-        }
-      ]
+      "clients": []
     }
 ---
 # The sidecar in front of Keycloak. Only our realm's endpoints and the static
@@ -223,8 +186,7 @@ spec:
           image: registry.redhat.io/rhbk/keycloak-rhel9@sha256:d6cada4ca8a5fe7b5ef850319aa5e1b8afa0ed50d0b1eb272147257cdb41ddbc
           args: ["start", "--import-realm"]
           env:
-            # Public address for browsers; backchannel calls (the key portal's
-            # token requests) may use the Service name instead.
+            # Public address for browsers; backchannel calls may use the Service name instead.
             - name: KC_HOSTNAME
               value: https://maas-sso-{{ maas_namespace }}.{{ maas_apps_domain }}
             - name: KC_HOSTNAME_BACKCHANNEL_DYNAMIC
@@ -271,19 +233,11 @@ spec:
             - name: GITHUB_CLIENT_SECRET
               valueFrom:
                 secretKeyRef: {name: maas-sso-github, key: client-secret}
-            - name: PORTAL_CLIENT_SECRET
-              valueFrom:
-                secretKeyRef: {name: maas-portal-oidc, key: client-secret}
             # Read by deploy.yml's usage-client step, so the user
             # dashboard's client secret never leaves the cluster.
             - name: USAGE_CLIENT_SECRET
               valueFrom:
                 secretKeyRef: {name: maas-usage-oidc, key: client-secret}
-            # Read by kcadm.sh's sync step: the admin portal's background
-            # reconciler signs in as this client's service account.
-            - name: RECONCILER_CLIENT_SECRET
-              valueFrom:
-                secretKeyRef: {name: maas-reconciler-oidc, key: client-secret}
             # kcadm.sh signs in as the maas-kcadm client with this; sync creates it.
             - name: KCADM_CLIENT_SECRET
               valueFrom:
@@ -354,8 +308,8 @@ spec:
             name: maas-sso-proxy
 ---
 # The service CA writes a certificate for maas-sso.{{ maas_namespace }}.svc into the
-# maas-sso-tls Secret. The Route goes to "public" (the sidecar); the key portal
-# talks to Keycloak directly on "https" for its token requests.
+# maas-sso-tls Secret. The Route goes to "public" (the sidecar); the admin
+# commands inside the pods talk to Keycloak directly on "https".
 apiVersion: v1
 kind: Service
 metadata:

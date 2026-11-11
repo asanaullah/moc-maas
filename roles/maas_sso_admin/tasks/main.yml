@@ -6,8 +6,8 @@
   ansible.builtin.assert:
     that:
       - maas_action is defined
-      - maas_action in ['init', 'groups', 'group-create', 'users', 'user-groups', 'add', 'remove', 'usage-client', 'sync']
-    fail_msg: set maas_action to one of init, groups, group-create, users, user-groups, add, remove, usage-client, sync
+      - maas_action in ['help', 'init', 'groups', 'group-create', 'group-delete', 'users', 'user-groups', 'user-create', 'user-delete', 'add', 'remove', 'usage-client', 'oidc-client', 'sync']
+    fail_msg: set maas_action to one of help, init, groups, group-create, group-delete, users, user-groups, user-create, user-delete, add, remove, usage-client, oidc-client, sync
     quiet: true
 
 - name: Find a running Keycloak pod
@@ -17,6 +17,7 @@
   vars:
     pod_label: app=maas-sso
     pod_what: deploy/maas-sso
+  when: maas_action != 'help'
 
 # The Keycloak image has no tar (which k8s_cp needs for its copy pipe) and
 # exec has no stdin, so the wrapper goes in base64-encoded through bash.
@@ -24,6 +25,7 @@
   ansible.builtin.set_fact:
     _maas_kcadm_b64: "{{ lookup('ansible.builtin.file', role_path ~ '/files/kcadm.sh') | b64encode }}"
   no_log: true
+  when: maas_action != 'help'
 
 - name: Put the kcadm wrapper into the pod
   kubernetes.core.k8s_exec:
@@ -31,6 +33,7 @@
     pod: "{{ _maas_pod }}"
     container: keycloak
     command: "bash -c 'echo {{ _maas_kcadm_b64 }} | base64 -d > /tmp/maas-kcadm.sh'"
+  when: maas_action != 'help'
 
 - name: "Run {{ maas_action }}"
   ansible.builtin.include_tasks: "{{ maas_action }}.yml"

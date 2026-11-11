@@ -86,3 +86,19 @@ spec:
     - name: https
       port: 8000
       targetPort: 8000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: maas-sim-pods
+  namespace: "{{ maas_namespace }}"
+  labels:
+    app.kubernetes.io/part-of: maas-test
+spec:
+  clusterIP: None
+  selector:
+    app: maas-sim
+  ports:
+    - name: https
+      port: 8000
+      targetPort: 8000

@@ -1,0 +1,88 @@
+---
+apiVersion: maas.opendatahub.io/v1alpha1
+kind: MaaSModelRef
+metadata:
+  annotations:
+    maas.moc/served-name: maas-sim
+  name: maas-sim
+  namespace: parity-ns
+  labels:
+    maas.moc/managed: 'true'
+spec:
+  modelRef:
+    kind: LLMInferenceService
+    name: maas-sim
+---
+apiVersion: maas.opendatahub.io/v1alpha1
+kind: MaaSSubscription
+metadata:
+  name: standard
+  namespace: parity-ns
+  labels:
+    maas.moc/managed: 'true'
+spec:
+  modelRefs:
+  - name: maas-sim
+    namespace: parity-ns
+    tokenRateLimits:
+    - limit: 24000
+      window: 24h
+    - limit: 2000
+      window: 1h
+  owner:
+    groups:
+    - name: maas-standard
+    users: []
+  priority: 10
+---
+apiVersion: maas.opendatahub.io/v1alpha1
+kind: MaaSSubscription
+metadata:
+  name: free
+  namespace: parity-ns
+  labels:
+    maas.moc/managed: 'true'
+spec:
+  modelRefs:
+  - name: maas-sim
+    namespace: parity-ns
+    tokenRateLimits:
+    - limit: 1000
+      window: 1h
+  owner:
+    groups:
+    - name: maas-free
+    users: []
+  priority: 0
+---
+apiVersion: maas.opendatahub.io/v1alpha1
+kind: MaaSAuthPolicy
+metadata:
+  name: standard-access
+  namespace: parity-ns
+  labels:
+    maas.moc/managed: 'true'
+spec:
+  modelRefs:
+  - name: maas-sim
+    namespace: parity-ns
+  subjects:
+    groups:
+    - name: maas-standard
+    users: []
+---
+apiVersion: maas.opendatahub.io/v1alpha1
+kind: MaaSAuthPolicy
+metadata:
+  name: free-access
+  namespace: parity-ns
+  labels:
+    maas.moc/managed: 'true'
+spec:
+  modelRefs:
+  - name: maas-sim
+    namespace: parity-ns
+  subjects:
+    groups:
+    - name: maas-free
+    users: []

@@ -1,0 +1,23 @@
+# Assisted by Claude Opus
+# Lists the admin actions; run with -e maas_action=help.
+- name: List the admin actions
+  ansible.builtin.debug:
+    msg:
+      - "subscriptions          list subscriptions, access policies and models"
+      - "subscription-set       create or replace a subscription: -e maas_subscription=<name> -e maas_groups=<g[,g]> [-e maas_limits=24000/24h,2000/1h] [-e maas_users=u[,u]] [-e maas_priority=N] [-e maas_models=m[,m]]"
+      - "subscription-delete    remove a subscription and its access policy: -e maas_subscription=<name>"
+      - "group-map              add a group to an existing subscription: -e maas_group=<g> -e maas_subscription=<name>"
+      - "group-unmap            remove a group from a subscription: -e maas_group=<g> -e maas_subscription=<name>"
+      - "models                 list models"
+      - "model-set              add or update a model: -e maas_model=<name> [-e maas_served_name=<name>]"
+      - "model-delete           remove a model: -e maas_model=<name>"
+      - "render                 re-render and apply after a manual governance edit"
+      - "keys                   list keys, optionally for one user: [-e maas_username=<user>]"
+      - "revoke                 revoke one key: -e maas_key_id=<id>"
+      - "revoke-user            list or revoke a user's keys: -e maas_username=<user> [-e maas_dry_run=false]"
+      - "service-key            mint a key for an application: -e maas_owner=<owner> -e maas_key_name=<name> -e maas_subscription=<name> -e maas_days=30 [-e maas_secret_name=<secret>]"
+      - "tui-setup              create the three stress subscriptions maas-tui.py uses"
+      - "tui-cleanup            revoke the tui- keys"
+      - "audit                  show the admin audit trail: [-e maas_since=<timestamp>]"
+      - "help                   this list"
+      - "The playbook header in playbooks/admin.yml carries the same list."

@@ -1,7 +1,43 @@
 # Assisted by Claude Opus
-# The Envoy gateway that fronts the model pool, with the Kuadrant
-# wasm shim checking keys and Limitador counting tokens. The restart makes a
-# gateway that is already running pick up config changes.
+# The Envoy gateway that fronts the model pool, with Authorino and maas-api in
+# the same pod. The restart makes a gateway that is already running pick up
+# config changes.
+- name: Render the governance data the gateway config needs
+  ansible.builtin.include_role:
+    name: maas_governance
+  when: maas_governance_models is not defined or maas_wasm_config_json is not defined
+
+- name: Read the cluster's ingress CA
+  kubernetes.core.k8s_info:
+    kind: ConfigMap
+    namespace: openshift-config-managed
+    name: default-ingress-cert
+  register: _maas_gateway_ingress_ca
+  failed_when: false
+  when: maas_s3_ca is not defined
+
+- name: Check that the ingress CA is known
+  ansible.builtin.assert:
+    that: maas_s3_ca is defined or (_maas_gateway_ingress_ca.resources | default([]) | length > 0)
+    fail_msg: >-
+      cannot read openshift-config-managed/default-ingress-cert; set maas_s3_ca
+      in the inventory
+
+- name: Write the ingress CA
+  kubernetes.core.k8s:
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: maas-ingress-ca
+        namespace: "{{ maas_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: "{{ maas_part_of }}"
+      data:
+        ca-bundle.crt: "{{ maas_s3_ca if maas_s3_ca is defined else _maas_gateway_ingress_ca.resources[0].data['ca-bundle.crt'] }}"
+
 - name: Apply the gateway
   ansible.builtin.include_role:
     name: maas_common

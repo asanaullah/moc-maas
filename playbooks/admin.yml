@@ -1,32 +1,34 @@
 # Assisted by Claude Opus
-# MaaS admin from the command line, through the admin portal's JSON API
-# (run from inside the portal's own pod — it has no Service; it listens on
-# the pod's localhost only).
+# MaaS admin from the command line. Governance actions edit ConfigMap
+# maas-governance and re-render it; key actions call maas-api inside a
+# gateway pod with the reserved admin group.
 #
 #   ansible-playbook -i clusters/oac-dev-workload0.yml playbooks/admin.yml -e maas_action=<action>
 #
-#   maas_action=plans
-#   maas_action=plan-set    -e maas_plan=standard -e maas_tokens=20000
-#                           [-e maas_window=60] [-e maas_days=90] [-e maas_models=maas-sim,other]
-#                           [-e maas_priority=0] [-e maas_max_request_tokens=4096] [-e maas_max_requests=600]
-#                           [-e maas_hourly_tokens=<n>, 0 for none]
-#   maas_action=plan-delete -e maas_plan=standard
-#   maas_action=groups                     # which group is mapped to which plan
-#   maas_action=group-map   -e maas_group=maas-standard -e maas_plan=standard
-#   maas_action=group-unmap -e maas_group=maas-standard
-#   maas_action=limits                      # rewrite Limitador's limits from the plans
-#   maas_action=keys
-#   maas_action=service-key -e maas_owner=<service> -e maas_key_name=<name> -e maas_plan=<plan> -e maas_days=30
+#   maas_action=help          # list every action and its arguments
+#   maas_action=subscriptions
+#   maas_action=subscription-set -e maas_subscription=standard -e maas_groups=maas-standard
+#                           -e maas_limits=24000/24h,2000/1h
+#                           [-e maas_users=a,b] [-e maas_priority=10] [-e maas_models=maas-sim]
+#   maas_action=subscription-delete -e maas_subscription=standard
+#   maas_action=group-map   -e maas_group=maas-standard -e maas_subscription=standard
+#   maas_action=group-unmap -e maas_group=maas-standard -e maas_subscription=standard
+#   maas_action=models
+#   maas_action=model-set   -e maas_model=maas-sim [-e maas_served_name=maas-sim]
+#   maas_action=model-delete -e maas_model=maas-sim
+#   maas_action=render
+#   maas_action=keys [-e maas_username=<user>]
+#   maas_action=revoke      -e maas_key_id=<id>
+#   maas_action=revoke-user -e maas_username=<user> [-e maas_dry_run=false]
+#   maas_action=service-key -e maas_owner=<owner> -e maas_key_name=<name>
+#                           -e maas_subscription=<sub> -e maas_days=30
 #                           [-e maas_secret_name=<name>]   # store the key in that Secret,
 #                                                           # print only its id
-#   maas_action=revoke      -e maas_key_id=<id>
-#   maas_action=revoke-user -e maas_email=<email>              # every key of one owner, and their sessions
-#   maas_action=user-reconcile -e maas_email=<email> -e maas_groups='["group1","group2"]'
-#   maas_action=tui-cleanup                               # delete tui-* plans with no keys left
-#   maas_action=audit
+#   maas_action=tui-setup
+#   maas_action=tui-cleanup
+#   maas_action=audit [-e maas_since=<timestamp>]
 #
-# Every action records the operator (from a SelfSubjectReview) as the audit
-# trail's actor.
+# Every action records the operator (from a SelfSubjectReview) in the audit trail.
 - name: MaaS admin
   hosts: localhost
   gather_facts: false

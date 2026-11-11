@@ -25,7 +25,7 @@
           pattern: maas-*.dump
           user: maas
           db: maas
-          counts: SELECT 'plans' AS what, count(*) FROM plans UNION ALL SELECT 'group_plans', count(*) FROM group_plans UNION ALL SELECT 'api_keys', count(*) FROM api_keys
+          counts: SELECT 'sessions' AS what, count(*) FROM sessions UNION ALL SELECT 'audit', count(*) FROM audit UNION ALL SELECT 'oauth_pending', count(*) FROM oauth_pending
         - name: maas-restore-sso
           live: maas-sso-db-0
           subdir: maas/sso-backups
@@ -33,6 +33,16 @@
           user: keycloak
           db: keycloak
           counts: SELECT 'user_entity' AS what, count(*) FROM user_entity UNION ALL SELECT 'keycloak_group', count(*) FROM keycloak_group
+        - name: maas-restore-api
+          live: maas-db-0
+          live_db: maasapi
+          live_user: maasapi
+          live_password_env: MAASAPI_PASSWORD
+          subdir: maas/backups
+          pattern: maasapi-*.dump
+          user: maasapi
+          db: maasapi
+          counts: SELECT 'api_keys' AS what, count(*) FROM api_keys
       loop_control:
         loop_var: _maas_restore
         label: "{{ _maas_restore.name }}"

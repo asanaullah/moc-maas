@@ -1,41 +1,68 @@
 # Assisted by Claude Opus
-# Mints a service key for an application. Without maas_secret_name the key
-# is printed once, in the API's response — copy it then; with it, the key is
-# stored in that Secret (keys: key, id) and only the id is printed.
 - name: Check the arguments
   ansible.builtin.assert:
     that:
       - maas_owner is defined
-      - maas_owner is match('^[a-z0-9][a-z0-9._@-]{0,62}$')
+      - maas_owner is match('^[a-zA-Z0-9@._:-]+$')
       - maas_key_name is defined
       - maas_key_name is match('^[A-Za-z0-9._-]+$')
-      - maas_plan is defined
-      - maas_plan is match('^[a-z0-9][a-z0-9._-]{0,62}$')
+      - maas_subscription is defined
+      - maas_subscription is match('^[a-z0-9][a-z0-9._-]{0,62}$')
       - maas_days is defined
-      - 1 <= maas_days | int <= 3650
+      - 1 <= maas_days | int <= maas_api_key_max_days | int
       - maas_secret_name is not defined or maas_secret_name is match('^[A-Za-z0-9._-]+$')
-    fail_msg: set maas_owner, maas_key_name, maas_plan and maas_days; optional maas_secret_name to store the key in
+    fail_msg: >-
+      set maas_owner, maas_key_name, maas_subscription and maas_days;
+      optional maas_secret_name to store the key in
     quiet: true
+
+- name: Read the governance data
+  ansible.builtin.include_tasks: governance-read.yml
+
+- name: Start the group lookup
+  ansible.builtin.set_fact:
+    _maas_sub_group: ""
+
+- name: Find the subscription's first owner group
+  ansible.builtin.set_fact:
+    _maas_sub_group: "{{ item.spec.owner.groups[0].name }}"
+  loop: "{{ _maas_objects | selectattr('kind', 'equalto', 'MaaSSubscription') | list }}"
+  loop_control:
+    label: "{{ item.metadata.name }}"
+  when:
+    - item.metadata.name == maas_subscription
+    - (item.spec.owner.groups | default([])) | length > 0
+
+- name: Check the subscription has an owner group
+  ansible.builtin.assert:
+    that: _maas_sub_group != ''
+    fail_msg: subscription {{ maas_subscription }} has no owner group to mint the key under
+    quiet: true
+
+- name: Remove the temporary file
+  ansible.builtin.file:
+    state: absent
+    path: "{{ _maas_gov_file.path }}"
 
 - name: Mint the service key
-  kubernetes.core.k8s_exec:
-    namespace: "{{ maas_namespace }}"
-    pod: "{{ _maas_pod }}"
-    command: "python3 /tmp/maas-api.py POST /api/service-keys '{{ {'owner': maas_owner, 'name': maas_key_name, 'plan': maas_plan, 'days': maas_days | int} | to_json }}' {{ _maas_actor_b64 }}"
-  register: _maas_api
+  ansible.builtin.include_tasks: maas-api.yml
+  vars:
+    _maas_api_method: POST
+    _maas_api_path: /v1/api-keys
+    _maas_api_actor: "{{ maas_owner }}"
+    _maas_api_groups: '["{{ _maas_sub_group }}"]'
+    _maas_api_body:
+      name: "{{ maas_key_name }}"
+      expiresIn: "{{ (maas_days | int) * 24 }}h"
+      subscription: "{{ maas_subscription }}"
+    _maas_api_secret: true
+
+- name: Remember the answer
+  ansible.builtin.set_fact:
+    _maas_new_key: "{{ _maas_api_output | from_json }}"
   no_log: true
-  failed_when: false
-  changed_when: _maas_api.rc == 0
 
-# The mint's output stays hidden (it carries the key); its error body carries
-# no key material, so a refusal is visible here.
-- name: Check the mint succeeded
-  ansible.builtin.assert:
-    that: _maas_api.rc == 0
-    fail_msg: "{{ _maas_api.stderr | trim }}"
-    quiet: true
-
-- name: Store the service key in a Secret
+- name: Store the key in a Secret
   kubernetes.core.k8s:
     state: present
     namespace: "{{ maas_namespace }}"
@@ -49,22 +76,31 @@
         labels:
           app.kubernetes.io/part-of: "{{ maas_part_of }}"
       stringData:
-        key: "{{ (_maas_api.stdout | from_json).key }}"
-        id: "{{ (_maas_api.stdout | from_json).id }}"
+        key: "{{ _maas_new_key.key }}"
+        id: "{{ _maas_new_key.id }}"
   no_log: true
   when: maas_secret_name is defined
 
 - name: Report the stored key's id
   ansible.builtin.debug:
-    msg: "service key {{ (_maas_api.stdout | from_json).id }} stored in Secret {{ maas_secret_name }} (keys: key, id)"
+    msg: "service key {{ _maas_new_key.id }} stored in Secret {{ maas_secret_name }} (keys: key, id)"
   when: maas_secret_name is defined
 
 - name: Print the key once
   ansible.builtin.debug:
-    msg: "{{ _maas_api.stdout }}"
+    msg: "{{ _maas_api_output }}"
   when: maas_secret_name is not defined
 
-# So the key doesn't sit in a fact for the rest of the play.
-- name: Forget the response
+- name: Forget the key
   ansible.builtin.set_fact:
-    _maas_api: {}
+    _maas_new_key: {}
+  no_log: true
+
+- name: Record the action
+  ansible.builtin.include_tasks: audit-write.yml
+  vars:
+    _maas_target: "service-key/{{ maas_key_name }}"
+    _maas_details:
+      owner: "{{ maas_owner }}"
+      subscription: "{{ maas_subscription }}"
+      days: "{{ maas_days | int }}"

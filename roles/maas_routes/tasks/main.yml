@@ -9,7 +9,6 @@
     tasks_from: apply
   vars:
     manifests:
-      - maas-keys-route.yaml
       - maas-sso-route.yaml
       - maas-gateway-route.yaml
       - maas-usage-route.yaml

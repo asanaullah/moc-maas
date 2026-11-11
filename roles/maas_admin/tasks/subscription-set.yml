@@ -1,0 +1,59 @@
+# Assisted by Claude Opus
+- name: Check the arguments
+  ansible.builtin.assert:
+    that:
+      - maas_subscription is defined
+      - maas_subscription is match('^[a-z0-9][a-z0-9._-]{0,62}$')
+      - maas_groups is defined
+      - maas_limits is defined
+      - maas_priority | default(0) | string is match('^[0-9]+$')
+    fail_msg: >-
+      set maas_subscription, maas_groups and maas_limits (e.g. 24000/24h,2000/1h);
+      optional maas_users, maas_priority, maas_models
+    quiet: true
+
+- name: Read the governance data
+  ansible.builtin.include_tasks: governance-read.yml
+
+- name: Write the subscription and its access policy
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ role_path }}/files/governance_edit.py"
+      - --file
+      - "{{ _maas_gov_file.path }}"
+      - subscription-set
+      - --name
+      - "{{ maas_subscription }}"
+      - --namespace
+      - "{{ maas_namespace }}"
+      - --groups
+      - "{{ maas_groups }}"
+      - --users
+      - "{{ maas_users | default('') }}"
+      - --priority
+      - "{{ maas_priority | default(0) }}"
+      - --models
+      - "{{ maas_models | default('') }}"
+      - --limits
+      - "{{ maas_limits }}"
+  register: _maas_gov_edit
+  changed_when: _maas_gov_edit.rc == 0
+
+- name: Report the change
+  ansible.builtin.debug:
+    msg: "subscription {{ maas_subscription }} written"
+
+- name: Save and re-render
+  ansible.builtin.include_tasks: governance-save.yml
+
+- name: Record the action
+  ansible.builtin.include_tasks: audit-write.yml
+  vars:
+    _maas_target: "subscription/{{ maas_subscription }}"
+    _maas_details:
+      groups: "{{ maas_groups }}"
+      users: "{{ maas_users | default('') }}"
+      priority: "{{ maas_priority | default(0) }}"
+      models: "{{ maas_models | default('') }}"
+      limits: "{{ maas_limits }}"

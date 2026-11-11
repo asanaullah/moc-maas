@@ -1,0 +1,90 @@
+# Assisted by Claude Opus
+- name: Read the governance ConfigMap
+  kubernetes.core.k8s_info:
+    kind: ConfigMap
+    namespace: "{{ maas_namespace }}"
+    name: maas-governance
+  register: _maas_governance_cm
+
+- name: Create the governance ConfigMap from the defaults
+  kubernetes.core.k8s:
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: maas-governance
+        namespace: "{{ maas_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: "{{ maas_part_of }}"
+      data:
+        objects.yaml: "{{ maas_governance_objects | to_nice_yaml }}"
+  when: _maas_governance_cm.resources | length == 0
+
+- name: Re-read the governance ConfigMap
+  kubernetes.core.k8s_info:
+    kind: ConfigMap
+    namespace: "{{ maas_namespace }}"
+    name: maas-governance
+  register: _maas_governance_cm
+
+- name: Remember the governance input
+  ansible.builtin.set_fact:
+    maas_governance_input: "{{ _maas_governance_cm.resources[0].data['objects.yaml'] | from_yaml }}"
+
+- name: Render the governance data
+  ansible.builtin.include_tasks: render.yml
+
+- name: Apply the seed data ConfigMap
+  kubernetes.core.k8s:
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: maas-kube-seed
+        namespace: "{{ maas_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: "{{ maas_part_of }}"
+      data:
+        objects.yaml: "{{ _maas_seed_objects_yaml }}"
+        status.txt: "{{ _maas_seed_status_txt }}"
+        names.txt: "{{ _maas_seed_names_txt }}"
+        authconfig.yaml: "{{ _maas_authconfig_yaml }}"
+
+- name: Apply the limits ConfigMap
+  kubernetes.core.k8s:
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: maas-limits
+        namespace: "{{ maas_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: "{{ maas_part_of }}"
+      data:
+        limits.yaml: "{{ _maas_limits_yaml }}"
+
+- name: Apply the usage page's governance data
+  kubernetes.core.k8s:
+    state: present
+    apply: true
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: maas-usage-governance
+        namespace: "{{ maas_namespace }}"
+        labels:
+          app.kubernetes.io/part-of: "{{ maas_part_of }}"
+      data:
+        objects.json: "{{ maas_governance_input | to_json }}"
+
+- name: Remember the wasm configuration
+  ansible.builtin.set_fact:
+    maas_wasm_config: "{{ _maas_wasm_config_json | from_json }}"
+    maas_wasm_config_json: "{{ _maas_wasm_config_json }}"

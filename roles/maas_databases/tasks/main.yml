@@ -59,3 +59,24 @@
     tasks_from: wait_statefulsets
   vars:
     statefulsets: [maas-db, maas-sso-db]
+
+- name: Create the maasapi role and database
+  ansible.builtin.command:
+    argv:
+      - oc
+      - exec
+      - -n
+      - "{{ maas_namespace }}"
+      - maas-db-0
+      - -c
+      - postgres
+      - --
+      - bash
+      - -c
+      - |
+        psql -d postgres -U postgres -v ON_ERROR_STOP=1 -v pw="$MAASAPI_PASSWORD" <<"SQL"
+        SELECT 'CREATE ROLE maasapi LOGIN' WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'maasapi')\gexec
+        ALTER ROLE maasapi PASSWORD :'pw';
+        SELECT 'CREATE DATABASE maasapi OWNER maasapi' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'maasapi')\gexec
+        SQL
+  changed_when: false

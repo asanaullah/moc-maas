@@ -1,0 +1,14 @@
+# Assisted by Claude Opus
+- name: Apply the payload processors
+  ansible.builtin.include_role:
+    name: maas_common
+    tasks_from: apply
+  vars:
+    manifests: [maas-ipp.yaml]
+
+- name: Wait for the payload processors
+  ansible.builtin.include_role:
+    name: maas_common
+    tasks_from: wait_deployments
+  vars:
+    deployments: [maas-ipp-pre, maas-ipp-post]

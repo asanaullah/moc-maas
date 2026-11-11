@@ -56,9 +56,13 @@ echo "== manifests"
 import glob, sys, yaml
 from jinja2 import Template
 
-VARS = {"maas_namespace": "build-check", "maas_apps_domain": "apps.build-check.example",
+VARS = yaml.safe_load(open("roles/maas_common/defaults/main.yml")) or {}
+VARS.update({"maas_namespace": "build-check", "maas_apps_domain": "apps.build-check.example",
         "maas_route_concurrent_tcp": 50, "maas_route_rate_http": 100,
-        "maas_gateway_drain_seconds": 120, "maas_gateway_rate_per_second": 200, "maas_gateway_rate_burst": 400}
+        "maas_gateway_drain_seconds": 120,
+        "maas_kube_crd_configmaps": ["maas-kube-crd-build-check"], "maas_kube_crd_hash": "build-check",
+        "maas_governance_models": [{"name": "maas-sim", "publisher_id": "publishers/build-check/models/maas-sim"}],
+        "maas_wasm_config_json": '{"services":{},"actionSets":[]}'})
 for path in sorted(glob.glob("manifests/*.yaml")):
     docs = [d for d in yaml.safe_load_all(Template(open(path).read()).render(**VARS)) if d]
     if not docs:
@@ -67,8 +71,9 @@ for path in sorted(glob.glob("manifests/*.yaml")):
 EOF
 
 echo "== python files"
-python3 -m py_compile roles/maas_portals/files/portal.py roles/maas_smoke/files/smoke.py \
-  roles/maas_grafana/files/gen-dashboards.py roles/maas_admin/files/api.py maas-tui.py
+python3 -m py_compile roles/maas_usage/files/portal.py roles/maas_smoke/files/smoke.py \
+  roles/maas_grafana/files/gen-dashboards.py roles/maas_admin/files/governance_edit.py \
+  roles/maas_sync/files/sync_plan.py maas-tui.py
 echo "  ok"
 
 echo "== unit tests"
@@ -76,6 +81,27 @@ out="$(python3 -m unittest discover -s tests 2>&1)" || { echo "$out" | grep -v '
 echo "$out" | tail -1
 find . -name __pycache__ -not -path './collections/*' -prune -exec rm -rf {} +
 echo "  ok"
+
+echo "== governance"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+ansible-playbook -i "$cluster" tests/governance-render.yml -e out="$tmp" >/dev/null
+diff -ru tests/golden "$tmp"
+echo "  ok"
+
+echo "== governance checks"
+for f in tests/fixtures/bad-*.yaml; do
+  n="$(basename "$f" | cut -d- -f2)"
+  if ansible-playbook -i "$cluster" tests/governance-render.yml -e out="$tmp" -e maas_governance_fixture="$PWD/$f" >"$tmp/out" 2>"$tmp/err"; then
+    echo "  FAIL  $f rendered without an error" >&2; exit 1
+  fi
+  if ! grep -q "rule $n:" "$tmp/err" "$tmp/out"; then
+    echo "  FAIL  $f: expected the rule $n message" >&2
+    cat "$tmp/err" "$tmp/out" >&2
+    exit 1
+  fi
+  echo "  ok  $(basename "$f")"
+done
 
 echo "== envoy"
 # A mistyped field otherwise shows up only as gateway pods that crash at start.
@@ -89,8 +115,11 @@ if command -v podman >/dev/null; then
 import yaml
 from jinja2 import Template
 
-VARS = {"maas_namespace": "build-check", "maas_apps_domain": "apps.build-check.example",
-        "maas_gateway_rate_per_second": 200, "maas_gateway_rate_burst": 400, "maas_gateway_drain_seconds": 120}
+VARS = yaml.safe_load(open("roles/maas_common/defaults/main.yml")) or {}
+VARS.update({"maas_namespace": "build-check", "maas_apps_domain": "apps.build-check.example",
+        "maas_gateway_drain_seconds": 120,
+        "maas_governance_models": [{"name": "maas-sim", "publisher_id": "publishers/build-check/models/maas-sim"}],
+        "maas_wasm_config_json": '{"services":{},"actionSets":[]}'})
 PATHS = {"/etc/tls/tls.crt": "/cfg/tls.crt", "/etc/tls/tls.key": "/cfg/tls.key",
          "/etc/maas-ca/service-ca.crt": "/cfg/tls.crt",
          "/var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt": "/cfg/tls.crt"}
@@ -116,13 +145,26 @@ for manifest, cm, out in (("gateway.yaml", "maas-envoy-config", "gateway"), ("ma
     with open(f"build/{out}-envoy.yaml", "w") as f:
         yaml.safe_dump(cfg, f)
 PYEOF
-  for c in gateway sso; do
-    podman run --rm --entrypoint envoy -v "$PWD/build:/cfg:Z" \
-      docker.io/envoyproxy/envoy@sha256:45876da26cbb8ef73ef86e985586f363a619eef9c0081a9c3a781cb4b3b9255e \
-      --mode validate -c /cfg/$c-envoy.yaml >/dev/null 2>build/$c-envoy.log ||
-      { echo "  FAIL  $c (see build/$c-envoy.log)" >&2; exit 1; }
-    echo "  ok  $c"
-  done
+  sm_image="$(python3 -c 'import yaml; print(yaml.safe_load(open("roles/maas_common/defaults/main.yml"))["maas_image_envoy"])')"
+  community="docker.io/envoyproxy/envoy@sha256:45876da26cbb8ef73ef86e985586f363a619eef9c0081a9c3a781cb4b3b9255e"
+  envoy_image=""
+  if podman pull -q "$sm_image" >/dev/null 2>&1; then
+    envoy_image="$sm_image"; envoy_entry=/usr/local/bin/envoy
+  elif podman pull -q "$community" >/dev/null 2>&1; then
+    envoy_image="$community"; envoy_entry=envoy
+    echo "  note   validating with the community Envoy build (no registry login)"
+  fi
+  if [ -n "$envoy_image" ]; then
+    for c in gateway sso; do
+      podman run --rm --entrypoint "$envoy_entry" -v "$PWD/build:/cfg:Z" \
+        "$envoy_image" \
+        --mode validate -c /cfg/$c-envoy.yaml >/dev/null 2>build/$c-envoy.log ||
+        { echo "  FAIL  $c (see build/$c-envoy.log)" >&2; exit 1; }
+      echo "  ok  $c"
+    done
+  else
+    echo "  skipped: neither Envoy image can be pulled"
+  fi
 else
   echo "  skipped: podman not found"
 fi

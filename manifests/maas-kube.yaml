@@ -1,0 +1,130 @@
+# Assisted by Claude Opus
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: maas-service-ca
+  namespace: "{{ maas_namespace }}"
+  annotations:
+    service.beta.openshift.io/inject-cabundle: "true"
+  labels:
+    app.kubernetes.io/part-of: "{{ maas_part_of }}"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: maas-kube
+  namespace: "{{ maas_namespace }}"
+  labels:
+    app: maas-kube
+    app.kubernetes.io/part-of: "{{ maas_part_of }}"
+  annotations:
+    service.beta.openshift.io/serving-cert-secret-name: maas-kube-tls
+spec:
+  selector:
+    app: maas-kube
+  ports:
+    - name: https
+      port: {{ maas_kube_port }}
+      targetPort: {{ maas_kube_port }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: maas-kube
+  namespace: "{{ maas_namespace }}"
+  labels:
+    app: maas-kube
+    app.kubernetes.io/part-of: "{{ maas_part_of }}"
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: maas-kube
+  template:
+    metadata:
+      annotations:
+        maas.moc/crd-hash: "{{ maas_kube_crd_hash }}"
+      labels:
+        app: maas-kube
+        app.kubernetes.io/part-of: "{{ maas_part_of }}"
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: etcd
+          image: "{{ maas_image_etcd }}"
+          command: ["etcd"]
+          args: ["--name=maas-kube", "--data-dir=/var/lib/etcd",
+                 "--listen-client-urls=http://127.0.0.1:2379", "--advertise-client-urls=http://127.0.0.1:2379",
+                 "--listen-peer-urls=http://127.0.0.1:2380", "--initial-advertise-peer-urls=http://127.0.0.1:2380",
+                 "--initial-cluster=maas-kube=http://127.0.0.1:2380"]
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          volumeMounts:
+            - {name: etcd, mountPath: /var/lib/etcd}
+        - name: kube-apiserver
+          image: "{{ maas_image_kube_apiserver }}"
+          command: ["kube-apiserver"]
+          args: ["--etcd-servers=http://127.0.0.1:2379", "--secure-port={{ maas_kube_port }}", "--bind-address=0.0.0.0",
+                 "--tls-cert-file=/tls/tls.crt", "--tls-private-key-file=/tls/tls.key",
+                 "--token-auth-file=/auth/tokens.csv", "--authorization-mode=RBAC", "--anonymous-auth=false",
+                 "--service-account-issuer=https://maas-kube.{{ maas_namespace }}.svc",
+                 "--service-account-key-file=/tls/tls.key", "--service-account-signing-key-file=/tls/tls.key",
+                 "--service-cluster-ip-range=10.0.0.0/24"]
+          readinessProbe:
+            tcpSocket: {port: {{ maas_kube_port }}}
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 200m, memory: 512Mi}
+            limits: {cpu: "2", memory: 1Gi}
+          volumeMounts:
+            - {name: tls, mountPath: /tls}
+            - {name: auth, mountPath: /auth}
+        - name: seeder
+          image: "{{ maas_image_cli }}"
+          command: ["sh", "/seed-script/seed.sh"]
+          env:
+            - {name: HOME, value: /tmp}
+            - {name: KUBECONFIG, value: /kubeconfig/kubeconfig}
+            - {name: NS, value: "{{ maas_namespace }}"}
+          readinessProbe:
+            exec: {command: ["test", "-f", "/tmp/seeded"]}
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          volumeMounts:
+            - {name: kubeconfig, mountPath: /kubeconfig}
+            - {name: ca, mountPath: /etc/maas-kube-ca}
+            - {name: crds, mountPath: /crds}
+            - {name: base, mountPath: /base}
+            - {name: seed, mountPath: /seed}
+            - {name: db, mountPath: /db}
+            - {name: seed-script, mountPath: /seed-script}
+      volumes:
+        - name: etcd
+          emptyDir: {}
+        - name: tls
+          secret: {secretName: maas-kube-tls}
+        - name: auth
+          secret: {secretName: maas-kube-auth}
+        - name: kubeconfig
+          secret: {secretName: maas-kube-kubeconfig-seeder}
+        - name: ca
+          configMap: {name: maas-service-ca}
+        - name: crds
+          projected:
+            sources:
+{% for name in maas_kube_crd_configmaps %}
+              - configMap: {name: "{{ name }}"}
+{% endfor %}
+        - name: base
+          configMap: {name: maas-kube-base}
+        - name: seed
+          configMap: {name: maas-kube-seed}
+        - name: db
+          secret: {secretName: maas-db-config}
+        - name: seed-script
+          configMap: {name: maas-kube-seeder, defaultMode: 0555}

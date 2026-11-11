@@ -13,8 +13,9 @@
         == (_maas_dep.resources | first).status.observedGeneration | default(0)
     and (_maas_dep.resources | first).spec.replicas
         == (_maas_dep.resources | first).status.updatedReplicas | default(-1)
-    and (_maas_dep.resources | first).spec.replicas
-        == (_maas_dep.resources | first).status.availableReplicas | default(-1)
+    and (((_maas_dep.resources | first).status.availableReplicas | default(-1)) | int)
+        >= (((_maas_dep.resources | first).spec.replicas | int)
+            - ((deployments_unavailable_ok | default({})).get(item, 0) | int))
   retries: "{{ (maas_rollout_timeout | int / maas_poll_delay | int) | int }}"
   delay: "{{ maas_poll_delay }}"
   loop: "{{ deployments }}"

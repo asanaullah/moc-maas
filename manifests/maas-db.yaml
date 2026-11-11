@@ -48,6 +48,8 @@ spec:
           env:
             # Sized for the portals' pools (keys 2x11, usage 2x11, admin 10), doubled for rollouts, plus backups and admins.
             - {name: POSTGRESQL_MAX_CONNECTIONS, value: "150"}
+            - name: MAASAPI_PASSWORD
+              valueFrom: {secretKeyRef: {name: maas-db-config, key: MAASAPI_PASSWORD}}
           ports:
             - name: postgres
               containerPort: 5432
@@ -136,7 +138,12 @@ spec:
                   pg_dump -h maas-db.{{ maas_namespace }}.svc -U "$POSTGRESQL_USER" -d "$POSTGRESQL_DATABASE" -Fc -f "$f.partial";
                   mv "$f.partial" "$f";
                   ls -1t /backup/maas-*.dump | tail -n +15 | xargs -r rm -f;
-                  echo "wrote $f ($(stat -c %s "$f") bytes)"
+                  echo "wrote $f ($(stat -c %s "$f") bytes)";
+                  f2=/backup/maasapi-$(date -u +%Y%m%dT%H%M%SZ).dump;
+                  PGPASSWORD="$MAASAPI_PASSWORD" pg_dump -h maas-db.{{ maas_namespace }}.svc -U maasapi -d maasapi -Fc -f "$f2.partial";
+                  mv "$f2.partial" "$f2";
+                  ls -1t /backup/maasapi-*.dump | tail -n +15 | xargs -r rm -f;
+                  echo "wrote $f2 ($(stat -c %s "$f2") bytes)"
               env:
                 - name: POSTGRESQL_USER
                   valueFrom:
@@ -147,6 +154,9 @@ spec:
                 - name: PGPASSWORD
                   valueFrom:
                     secretKeyRef: {name: maas-db, key: POSTGRESQL_PASSWORD}
+                - name: MAASAPI_PASSWORD
+                  valueFrom:
+                    secretKeyRef: {name: maas-db-config, key: MAASAPI_PASSWORD}
                 # Check the server's certificate against the service CA.
                 - {name: PGSSLMODE, value: verify-full}
                 - {name: PGSSLROOTCERT, value: /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt}

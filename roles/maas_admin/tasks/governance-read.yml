@@ -1,0 +1,31 @@
+# Assisted by Claude Opus
+# Reads the governance objects into _maas_objects and a temporary file the
+# editor works on.
+- name: Read the governance data
+  kubernetes.core.k8s_info:
+    kind: ConfigMap
+    namespace: "{{ maas_namespace }}"
+    name: maas-governance
+  register: _maas_gov_info
+
+- name: Check the governance ConfigMap
+  ansible.builtin.assert:
+    that: _maas_gov_info.resources | length > 0
+    fail_msg: ConfigMap maas-governance is missing; deploy the MaaS first
+    quiet: true
+
+- name: Remember the objects
+  ansible.builtin.set_fact:
+    _maas_objects: "{{ _maas_gov_info.resources[0].data['objects.yaml'] | from_yaml }}"
+
+- name: Make a temporary governance file
+  ansible.builtin.tempfile:
+    state: file
+    prefix: maas-governance-
+  register: _maas_gov_file
+
+- name: Write the objects
+  ansible.builtin.copy:
+    content: "{{ _maas_gov_info.resources[0].data['objects.yaml'] }}"
+    dest: "{{ _maas_gov_file.path }}"
+    mode: "0600"

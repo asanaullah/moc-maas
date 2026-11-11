@@ -1,0 +1,21 @@
+# Assisted by Claude Opus
+- name: Check the arguments
+  ansible.builtin.assert:
+    that:
+      - maas_user is defined
+      - maas_user is match('^[A-Za-z0-9._@-]+$')
+    fail_msg: set maas_user
+    quiet: true
+
+- name: Delete the user
+  kubernetes.core.k8s_exec:
+    namespace: "{{ maas_namespace }}"
+    pod: "{{ _maas_pod }}"
+    container: keycloak
+    command: "bash /tmp/maas-kcadm.sh user-delete {{ maas_user }}"
+  register: _maas_kcadm
+  failed_when: _maas_kcadm.rc != 0 and 'no user' not in _maas_kcadm.stderr
+
+- name: Report
+  ansible.builtin.debug:
+    msg: "{{ _maas_kcadm.stdout_lines }}"

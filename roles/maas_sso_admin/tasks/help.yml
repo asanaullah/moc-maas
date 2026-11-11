@@ -1,0 +1,20 @@
+# Assisted by Claude Opus
+# Lists the Keycloak admin actions; run with -e maas_action=help.
+- name: List the Keycloak admin actions
+  ansible.builtin.debug:
+    msg:
+      - "groups                 list the realm's groups"
+      - "group-create           create a group: -e maas_group=<name>"
+      - "group-delete           remove a group: -e maas_group=<name>"
+      - "users                  list the realm's users"
+      - "user-groups            list a user's groups: -e maas_email=<email>"
+      - "user-create            create a local user and join it to a group: -e maas_user=<name> -e maas_group=<name> -e maas_password=<pw>"
+      - "user-delete            remove a local user: -e maas_user=<name>"
+      - "add                    add a signed-in user to a group: -e maas_email=<email> -e maas_group=<name>"
+      - "remove                 remove a user from a group: -e maas_email=<email> -e maas_group=<name>"
+      - "init                   first-time realm setup (deploy.yml runs it)"
+      - "sync                   re-apply the GitHub app's settings and the clients (deploy.yml runs it)"
+      - "usage-client           create or update the usage page's client (deploy.yml runs it)"
+      - "oidc-client            create or update maas-oidc (deploy.yml runs it)"
+      - "help                   this list"
+      - "The playbook header in playbooks/sso-admin.yml carries the same list."

@@ -1,0 +1,12 @@
+# Assisted by Claude Opus
+maas_governance_objects:
+  - apiVersion: maas.opendatahub.io/v1alpha1
+    kind: MaaSModelRef
+    metadata:
+      name: maas-sim
+      annotations:
+        maas.moc/served-name: maas-sim
+    spec:
+      modelRef:
+        kind: LLMInferenceService
+        name: maas-sim

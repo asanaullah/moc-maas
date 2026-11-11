@@ -20,18 +20,3 @@
 - name: Report
   ansible.builtin.debug:
     msg: "{{ _maas_kcadm.stdout_lines }}"
-
-- name: Read the groups the user still holds
-  kubernetes.core.k8s_exec:
-    namespace: "{{ maas_namespace }}"
-    pod: "{{ _maas_pod }}"
-    container: keycloak
-    command: "bash /tmp/maas-kcadm.sh user-groups {{ maas_email }}"
-  register: _maas_kcadm
-
-- name: Bring the user's keys in step with those groups
-  ansible.builtin.include_role:
-    name: maas_admin
-  vars:
-    maas_admin_action: user-reconcile
-    maas_groups: "{{ _maas_kcadm.stdout_lines | select | list }}"

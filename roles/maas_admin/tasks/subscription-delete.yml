@@ -1,0 +1,33 @@
+# Assisted by Claude Opus
+- name: Check the arguments
+  ansible.builtin.assert:
+    that:
+      - maas_subscription is defined
+      - maas_subscription is match('^[a-z0-9][a-z0-9._-]{0,62}$')
+    fail_msg: set maas_subscription
+    quiet: true
+
+- name: Read the governance data
+  ansible.builtin.include_tasks: governance-read.yml
+
+- name: Remove the subscription and its access policy
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ role_path }}/files/governance_edit.py"
+      - --file
+      - "{{ _maas_gov_file.path }}"
+      - subscription-delete
+      - --name
+      - "{{ maas_subscription }}"
+  register: _maas_gov_edit
+  changed_when: _maas_gov_edit.rc == 0
+
+- name: Save and re-render
+  ansible.builtin.include_tasks: governance-save.yml
+
+- name: Record the action
+  ansible.builtin.include_tasks: audit-write.yml
+  vars:
+    _maas_target: "subscription/{{ maas_subscription }}"
+    _maas_details: {}

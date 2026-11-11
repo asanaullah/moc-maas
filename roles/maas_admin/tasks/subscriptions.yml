@@ -1,0 +1,18 @@
+# Assisted by Claude Opus
+- name: Read the governance data
+  ansible.builtin.include_tasks: governance-read.yml
+
+- name: Show the subscriptions
+  ansible.builtin.command:
+    argv: [python3, "{{ role_path }}/files/governance_edit.py", --file, "{{ _maas_gov_file.path }}", show]
+  register: _maas_gov_show
+  changed_when: false
+
+- name: Report
+  ansible.builtin.debug:
+    msg: "{{ _maas_gov_show.stdout | from_json }}"
+
+- name: Remove the temporary file
+  ansible.builtin.file:
+    state: absent
+    path: "{{ _maas_gov_file.path }}"

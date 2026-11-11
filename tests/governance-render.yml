@@ -1,0 +1,15 @@
+# Assisted by Claude Opus
+- name: Render the governance outputs
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../roles/maas_common/defaults/main.yml
+  vars:
+    maas_namespace: parity-ns
+    maas_apps_domain: apps.example.com
+    maas_governance_input: "{{ lookup('ansible.builtin.file', maas_governance_fixture | default(playbook_dir + '/fixtures/governance-sample.yaml')) | from_yaml }}"
+  tasks:
+    - name: Render
+      ansible.builtin.include_role:
+        name: maas_governance
+        tasks_from: render.yml

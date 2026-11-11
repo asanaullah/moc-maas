@@ -1,0 +1,216 @@
+# Assisted by Claude Opus
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: payload-processing-plugins
+  namespace: "{{ maas_namespace }}"
+  labels:
+    app.kubernetes.io/part-of: "{{ maas_part_of }}"
+data:
+  custom-pre-processing-ipp-config.yaml: |
+    apiVersion: llm-d.ai/v1alpha1
+    kind: PayloadProcessorConfig
+    plugins:
+    - type: body-field-to-header
+      name: model-extractor
+      parameters:
+        fieldName: model
+        headerName: X-Gateway-Model-Name
+    - type: model-provider-resolver
+    profiles:
+    - name: default
+      plugins:
+        request:
+        - pluginRef: model-extractor
+        - pluginRef: model-provider-resolver
+  custom-ipp-config.yaml: |
+    apiVersion: llm-d.ai/v1alpha1
+    kind: PayloadProcessorConfig
+    plugins:
+    - type: maas-headers-guard
+      name: maas-headers-guard
+    - type: stream-usage-enforcer
+    - type: model-provider-resolver
+    - type: api-translation
+    - type: apikey-injection
+    profiles:
+    - name: default
+      plugins:
+        request:
+        - pluginRef: maas-headers-guard
+        - pluginRef: stream-usage-enforcer
+        - pluginRef: model-provider-resolver
+        - pluginRef: api-translation
+        - pluginRef: apikey-injection
+        response:
+        - pluginRef: api-translation
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: maas-ipp-pre
+  namespace: "{{ maas_namespace }}"
+  labels:
+    app: maas-ipp-pre
+    app.kubernetes.io/part-of: "{{ maas_part_of }}"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: maas-ipp-pre
+  template:
+    metadata:
+      labels:
+        app: maas-ipp-pre
+        app.kubernetes.io/part-of: "{{ maas_part_of }}"
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: payload-processing
+          image: "{{ maas_image_ipp }}"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              type: RuntimeDefault
+          args:
+            - --config-file
+            - /config/custom-pre-processing-ipp-config.yaml
+            - --v=3
+            - --tracing=false
+          env:
+            - {name: KUBECONFIG, value: /kubeconfig/kubeconfig}
+            - {name: NAMESPACE, value: "{{ maas_namespace }}"}
+            - {name: GATEWAY_NAME, value: "{{ maas_gateway_name }}"}
+            - {name: GATEWAY_NAMESPACE, value: "{{ maas_namespace }}"}
+          ports:
+            - {name: grpc, containerPort: 9004, protocol: TCP}
+            - {name: health, containerPort: 9005, protocol: TCP}
+            - {name: metrics, containerPort: 9090, protocol: TCP}
+          livenessProbe:
+            tcpSocket: {port: grpc}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            tcpSocket: {port: grpc}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 25m, memory: 32Mi}
+            limits: {cpu: 200m, memory: 128Mi}
+          volumeMounts:
+            - {name: config, mountPath: /config}
+            - {name: kubeconfig, mountPath: /kubeconfig}
+            - {name: ca, mountPath: /etc/maas-kube-ca}
+      volumes:
+        - name: config
+          configMap: {name: payload-processing-plugins}
+        - name: kubeconfig
+          secret: {secretName: maas-kube-kubeconfig-ipp}
+        - name: ca
+          configMap: {name: maas-service-ca}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: maas-ipp-post
+  namespace: "{{ maas_namespace }}"
+  labels:
+    app: maas-ipp-post
+    app.kubernetes.io/part-of: "{{ maas_part_of }}"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: maas-ipp-post
+  template:
+    metadata:
+      labels:
+        app: maas-ipp-post
+        app.kubernetes.io/part-of: "{{ maas_part_of }}"
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: payload-processing
+          image: "{{ maas_image_ipp }}"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              type: RuntimeDefault
+          args:
+            - --config-file
+            - /config/custom-ipp-config.yaml
+            - --v=3
+            - --tracing=false
+          env:
+            - {name: KUBECONFIG, value: /kubeconfig/kubeconfig}
+            - {name: NAMESPACE, value: "{{ maas_namespace }}"}
+            - {name: GATEWAY_NAME, value: "{{ maas_gateway_name }}"}
+            - {name: GATEWAY_NAMESPACE, value: "{{ maas_namespace }}"}
+          ports:
+            - {name: grpc, containerPort: 9004, protocol: TCP}
+            - {name: health, containerPort: 9005, protocol: TCP}
+            - {name: metrics, containerPort: 9090, protocol: TCP}
+          livenessProbe:
+            tcpSocket: {port: grpc}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            tcpSocket: {port: grpc}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          volumeMounts:
+            - {name: config, mountPath: /config}
+            - {name: kubeconfig, mountPath: /kubeconfig}
+            - {name: ca, mountPath: /etc/maas-kube-ca}
+      volumes:
+        - name: config
+          configMap: {name: payload-processing-plugins}
+        - name: kubeconfig
+          secret: {secretName: maas-kube-kubeconfig-ipp}
+        - name: ca
+          configMap: {name: maas-service-ca}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: maas-ipp-pre
+  namespace: "{{ maas_namespace }}"
+  labels:
+    app: maas-ipp-pre
+    app.kubernetes.io/part-of: "{{ maas_part_of }}"
+spec:
+  selector:
+    app: maas-ipp-pre
+  ports:
+    - {name: grpc, port: 9004, targetPort: 9004}
+    - {name: metrics, port: 9090, targetPort: 9090}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: maas-ipp-post
+  namespace: "{{ maas_namespace }}"
+  labels:
+    app: maas-ipp-post
+    app.kubernetes.io/part-of: "{{ maas_part_of }}"
+spec:
+  selector:
+    app: maas-ipp-post
+  ports:
+    - {name: grpc, port: 9004, targetPort: 9004}
+    - {name: metrics, port: 9090, targetPort: 9090}

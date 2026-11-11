@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
+# ruff: noqa: BLE001, S110
 """Live view of the MaaS, driven like real clients.
 
-Pick a set of simulated users, each with a random request type and token
-budget, then watch the gateway serve them: requests per replica, tokens
-counted by Limitador against each user's budget, and 429s once a budget runs
-out.
+Pick a set of simulated users, each with a request type, then watch the
+gateway serve them: requests per replica, tokens counted by Limitador against
+each user's subscription budget, and 429s once a budget runs out.
 
     ./maas-tui.py [namespace]     # uses the current oc login
 
-Each session creates, through the admin portal's API, one plan per simulated
-user (its budget, model maas-sim) and one service key on it, and sends that
-user's traffic with its key through the real gateway path. Session names are
-unique, so counters start fresh. On exit the keys are revoked and the plans
-deleted; the admin portal removes their limits from Limitador.
+The three stress subscriptions are fixed (tui-chat, tui-tool-call,
+tui-research, one per request type); create them once with
+playbooks/admin.yml -e maas_action=tui-setup. Each session then mints one key
+per simulated user under a fresh identity (tui-<session>-<n>), so counters
+start at zero, and sends that user's traffic with its key through the real
+gateway path. On exit the keys are revoked.
 
 The load generator runs inside the maas-client pod (one `oc exec`, keys passed
-on stdin); the admin API is reached with a port-forward.
+on stdin); maas-api is reached with a port-forward to a gateway pod's
+localhost:8090.
 """
 import curses
 import json
@@ -28,14 +30,21 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 NS = sys.argv[1] if len(sys.argv) > 1 else "uat-project"
 CLIENT = "maas-client"
 WINDOW = 60  # seconds per budget window
 TYPES = ["chat", "tool-call", "research"]
-# Budget range per type, in tokens per window.
-BUDGETS = {"chat": (5_000, 20_000), "tool-call": (40_000, 200_000), "research": (15_000, 50_000)}
+# Fixed token budget per 60-second window for each type's subscription.
+LIMITS = {"chat": 10_000, "tool-call": 100_000, "research": 30_000}
+SUBSCRIPTION = {t: f"tui-{t}" for t in TYPES}
+MODEL = "maas-sim"
+PUBLISHER = f"publishers/{NS}/models/{MODEL}"
+ADMIN_GROUP = "maas-local-admin"
+# The variable the governance role writes into every token limit.
+VARIABLE = 'descriptors[0]["auth.identity.userid"]'
 
 # Runs in maas-client. Standard library only.
 GENERATOR = r'''
@@ -47,8 +56,6 @@ def emit(o):
         sys.stdout.write(json.dumps(o) + "\n"); sys.stdout.flush()
 def get(url):
     return json.loads(urllib.request.urlopen(url, timeout=5).read())
-if cfg["mode"] == "limits":
-    emit(get(cfg["limitador"] + "/limits/maas")); sys.exit(0)
 WORDS = ("model token budget gateway replica request prompt answer cache prefix "
          "limit counter window user router envoy picker queue latency stream").split()
 # Per type: words in a per-user prefix, random words after it, max_tokens.
@@ -78,7 +85,7 @@ def run(u, stop):
         time.sleep(1.0 if status == 429 else rng.uniform(0.1, 0.5))
 def poll():
     try:
-        emit({"t": "counters", "data": get(cfg["limitador"] + "/counters/maas")})
+        emit({"t": "counters", "data": get(cfg["counters"])})
     except Exception as e:
         emit({"t": "log", "msg": "counters: %s" % e})
 finished = threading.Event()
@@ -96,11 +103,13 @@ emit({"t": "done"})
 '''
 
 BASE_CFG = {"url": "http://maas-gateway:8080/v1/chat/completions",
-            "limitador": "http://maas-limitador:8080", "model": "maas-sim"}
+            "limitador": "http://maas-limitador:8080",
+            "counters": "http://maas-limitador:8080/counters/" + urllib.parse.quote(f"{NS}/{MODEL}", safe=""),
+            "model": PUBLISHER}
 
 
 def oc(*args, input=None):
-    r = subprocess.run(["oc", "-n", NS, *args], input=input, capture_output=True, text=True)
+    r = subprocess.run(["oc", "-n", NS, *args], input=input, capture_output=True, text=True, check=False)
     if r.returncode != 0:
         raise RuntimeError(f"oc {' '.join(args[:3])}: {r.stderr.strip()}")
     return r.stdout
@@ -109,40 +118,38 @@ def oc(*args, input=None):
 GEN_CMD = ["oc", "-n", NS, "exec", "-i", CLIENT, "--", "python3", "-u", "-c", GENERATOR]
 
 
-def run_gen(cfg):
-    """Runs the generator once (for the "limits" mode) and returns its output."""
-    r = subprocess.run(GEN_CMD, input=json.dumps(cfg) + "\n", capture_output=True, text=True)
-    return r.stdout
-
-
-class AdminAPI:
-    """The admin portal's JSON API, through a port-forward held for the TUI's life."""
+class MaasAPI:
+    """maas-api on a gateway pod's localhost, through a port-forward held for
+    the TUI's life. Identity comes from the headers Authorino would set."""
 
     def __init__(self):
         s = socket.socket()
         s.bind(("127.0.0.1", 0))
         self.port = s.getsockname()[1]
         s.close()
-        self.pf = subprocess.Popen(["oc", "-n", NS, "port-forward", "deploy/maas-admin", f"{self.port}:8080"],
+        self.pf = subprocess.Popen(["oc", "-n", NS, "port-forward", "deploy/maas-gateway", f"{self.port}:8090"],
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for _ in range(60):
             try:
-                urllib.request.urlopen(f"http://127.0.0.1:{self.port}/healthz", timeout=2)
+                urllib.request.urlopen(f"http://127.0.0.1:{self.port}/health", timeout=2)
                 return
             except Exception:
                 time.sleep(0.5)
         self.close()
-        raise RuntimeError("can't reach the admin portal through a port-forward")
+        raise RuntimeError("can't reach maas-api through a port-forward")
 
-    def call(self, path, body=None):
-        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/{path}",
+    def call(self, method, path, username, groups, body=None):
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}",
                                      data=json.dumps(body).encode() if body is not None else None,
-                                     headers={"X-MaaS-Admin": "1", "Content-Type": "application/json"})
+                                     method=method,
+                                     headers={"X-MaaS-Username": username,
+                                              "X-MaaS-Group": json.dumps(groups),
+                                              "Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(req, timeout=30) as r:
                 return json.loads(r.read())
         except urllib.error.HTTPError as e:
-            raise RuntimeError(f"admin API {path}: {e.code} {e.read().decode().strip()[:120]}")
+            raise RuntimeError(f"maas-api {path}: {e.code} {e.read().decode().strip()[:160]}")
 
     def close(self):
         if self.pf.poll() is None:
@@ -152,15 +159,7 @@ class AdminAPI:
 
 def random_user(name, rng):
     t = rng.choice(TYPES)
-    lo, hi = BUDGETS[t]
-    return {"name": name, "type": t, "budget": rng.randrange(lo, hi + 1, 1000), "on": True}
-
-
-def limit_plan(limit):
-    for c in limit.get("conditions", []):
-        if c.startswith("descriptors[0]['plan'] == '"):
-            return c.split("'")[3]
-    return None
+    return {"name": name, "type": t, "budget": LIMITS[t], "on": True}
 
 
 class Session:
@@ -170,11 +169,12 @@ class Session:
         self.users = users
         self.duration = duration
         self.api = api
-        self.sid = "%06x" % random.getrandbits(24)
-        for u in users:
-            u["plan"] = f"tui-{self.sid}-{u['name']}"
-        self.plan_user = {u["plan"]: u["name"] for u in users}
-        self.key_ids = []
+        self.sid = f"{random.getrandbits(24):06x}"
+        for n, u in enumerate(users, 1):
+            u["identity"] = f"tui-{self.sid}-{n}"
+            u["sub"] = SUBSCRIPTION[u["type"]]
+            u["budget"] = LIMITS[u["type"]]
+        self.by_identity = {u["identity"]: u["name"] for u in users}
         self.cleaned = False
         self.stats = {u["name"]: {"sent": 0, "ok": 0, "r429": 0, "err": 0, "tokens": 0,
                                   "ms": 0, "pods": {}} for u in users}
@@ -215,68 +215,53 @@ class Session:
                     pod = self.pods.get(m["up"].rsplit(":", 1)[0], m["up"])
                     s["pods"][pod] = s["pods"].get(pod, 0) + 1
             elif m["t"] == "counters":
-                self.counters = {}
+                counters = {}
                 for c in m["data"]:
-                    user = self.plan_user.get(limit_plan(c["limit"]))
+                    identity = (c.get("set_variables") or {}).get(VARIABLE)
+                    user = self.by_identity.get(identity)
                     if user:
                         rem = c["remaining"]
                         if rem >= 2**63:  # Limitador reports overshoot as a wrapped u64
                             rem -= 2**64
-                        self.counters[user] = (c["limit"]["max_value"] - rem, c["expires_in_seconds"])
+                        used = c["limit"]["max_value"] - rem
+                        if user not in counters or used > counters[user][0]:
+                            counters[user] = (used, c.get("expires_in_seconds"))
+                self.counters = counters
             elif m["t"] == "done":
                 self.done = True
                 self.status = "finished"
 
     def cleanup(self):
-        """Revoke this session's keys, then delete its plans (and so their limits)."""
+        """Revoke this session's keys (bulk revoke per fresh identity)."""
         if self.cleaned:
             return
         self.cleaned = True
-        for kid in self.key_ids:
-            try:
-                self.api.call("keys/revoke", {"id": kid})
-            except Exception:
-                pass
         for u in self.users:
             try:
-                self.api.call("plans/delete", {"name": u["plan"]})
+                self.api.call("POST", "/v1/api-keys/bulk-revoke", "maas-tui-admin",
+                              [ADMIN_GROUP], {"username": u["identity"]})
             except Exception:
                 pass
 
 
 def prepare(sess):
-    """Create the session's plans and keys, wait for Limitador, then start traffic."""
+    """Mint the session's keys, then start traffic."""
     try:
         keys = {}
         for n, u in enumerate(sess.users, 1):
-            sess.note(f"creating plan and key for {u['name']} ({n}/{len(sess.users)})")
-            sess.api.call("plans", {"name": u["plan"], "tokens": u["budget"], "window": WINDOW,
-                                    "days": 1, "models": [BASE_CFG["model"]]})
-            r = sess.api.call("service-keys", {"owner": f"maas-tui-{sess.sid}-{u['name']}",
-                                               "name": u["name"], "plan": u["plan"], "days": 1})
-            sess.key_ids.append(r["id"])
+            sess.note(f"minting a key for {u['identity']} ({n}/{len(sess.users)})")
+            r = sess.api.call("POST", "/v1/api-keys", u["identity"], [u["sub"]],
+                              {"name": u["name"], "expiresIn": "24h", "subscription": u["sub"]})
             keys[u["name"]] = r["key"]
             if sess.cancelled:
                 return
-        want = {u["plan"] for u in sess.users}
-        t0 = time.time()
-        while True:
-            loaded = json.loads(run_gen({**BASE_CFG, "mode": "limits"}) or "[]")
-            if want <= {limit_plan(lim) for lim in loaded}:
-                break
-            if time.time() - t0 > 180:
-                raise RuntimeError("Limitador did not load the session's limits within 180s")
-            if sess.cancelled:
-                return
-            sess.note(f"waiting for Limitador to load the session's limits ({int(time.time() - t0)}s)")
-            time.sleep(3)
         pods = json.loads(oc("get", "pods", "-l", "app=maas-sim", "-o", "json"))["items"]
         with sess.lock:
             sess.pods = {p["status"].get("podIP"): p["metadata"]["name"] for p in pods}
         if sess.cancelled:
             return
         sess.note(f"running session {sess.sid}")
-        cfg = {**BASE_CFG, "mode": "run", "duration": sess.duration,
+        cfg = {**BASE_CFG, "duration": sess.duration,
                "users": [{"name": u["name"], "type": u["type"], "key": keys[u["name"]]} for u in sess.users]}
         sess.proc = subprocess.Popen(GEN_CMD, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, text=True)
@@ -308,7 +293,7 @@ def put(win, y, x, text, attr=0):
 
 def bar(frac, width):
     frac = max(0.0, frac)
-    n = min(width, int(round(min(frac, 1.0) * width)))
+    n = min(width, round(min(frac, 1.0) * width))
     return "█" * n + "·" * (width - n)
 
 
@@ -319,14 +304,15 @@ def setup_screen(scr, users, duration, rng):
         scr.erase()
         put(scr, 0, 0, "MaaS test · " + NS + " · pick users", curses.A_BOLD)
         put(scr, 1, 0, f"budget window {WINDOW}s · run for {duration}s")
-        put(scr, 3, 0, f"   {'USER':<8}{'TYPE':<10}{'BUDGET/WINDOW':>14}", curses.A_UNDERLINE)
+        put(scr, 3, 0, f"   {'USER':<8}{'TYPE':<10}{'BUDGET/WINDOW':>14}{'SUBSCRIPTION':>16}", curses.A_UNDERLINE)
         for i, u in enumerate(users):
             mark = "[x]" if u["on"] else "[ ]"
             attr = curses.A_REVERSE if i == sel else 0
-            put(scr, 4 + i, 0, f"{mark} {u['name']:<8}{u['type']:<10}{u['budget']:>12,}", attr)
+            put(scr, 4 + i, 0, f"{mark} {u['name']:<8}{u['type']:<10}{LIMITS[u['type']]:>12,}{SUBSCRIPTION[u['type']]:>16}", attr)
         y = 5 + len(users)
-        put(scr, y, 0, "↑↓ move  space on/off  t type  b budget  r reroll all  +/- users", curses.A_DIM)
+        put(scr, y, 0, "↑↓ move  space on/off  t type  r reroll types  +/- users", curses.A_DIM)
         put(scr, y + 1, 0, "[ ] duration -/+30s  enter start  q quit", curses.A_DIM)
+        put(scr, y + 2, 0, "create the stress subscriptions once: admin.yml -e maas_action=tui-setup", curses.A_DIM)
         k = scr.getch()
         if k in (ord("q"), 27):
             return None
@@ -337,12 +323,10 @@ def setup_screen(scr, users, duration, rng):
         elif k == ord(" "):
             users[sel]["on"] = not users[sel]["on"]
         elif k == ord("t"):
-            u = users[sel]
-            u["type"] = TYPES[(TYPES.index(u["type"]) + 1) % len(TYPES)]
-            u["budget"] = rng.randrange(BUDGETS[u["type"]][0], BUDGETS[u["type"]][1] + 1, 1000)
-        elif k == ord("b"):
-            u = users[sel]
-            u["budget"] = rng.randrange(BUDGETS[u["type"]][0], BUDGETS[u["type"]][1] + 1, 1000)
+            old = users[sel]["type"]
+            new = TYPES[(TYPES.index(old) + 1) % len(TYPES)]
+            users[sel]["type"] = new
+            users[sel]["budget"] = LIMITS[new]
         elif k == ord("r"):
             users[:] = [random_user(u["name"], rng) for u in users]
         elif k == ord("+") and len(users) < 20:
@@ -379,7 +363,7 @@ def run_screen(scr, sess):
         if sess.proc and sess.proc.poll() is None:
             sess.proc.terminate()
         scr.erase()
-        put(scr, 0, 0, "revoking this session's keys and deleting its plans ...")
+        put(scr, 0, 0, "revoking this session's keys ...")
         scr.refresh()
         sess.cleanup()
 
@@ -423,7 +407,7 @@ def draw_run(scr, sess):
     y += 2 + len(pods)
     for j, msg in enumerate(sess.log[-2:]):
         put(scr, y + j, 0, msg, curses.A_DIM)
-    put(scr, y + 3, 0, ("n new session  " if sess.done else "") + "q quit (keys revoked, plans deleted)", curses.A_DIM)
+    put(scr, y + 3, 0, ("n new session  " if sess.done else "") + "q quit (keys revoked)", curses.A_DIM)
 
 
 def main(scr):
@@ -435,7 +419,7 @@ def main(scr):
     rng = random.Random()
     users = [random_user(f"user{i:02d}", rng) for i in range(1, 7)]
     duration = 120
-    api = AdminAPI()
+    api = MaasAPI()
     try:
         while True:
             picked = setup_screen(scr, users, duration, rng)
@@ -457,11 +441,11 @@ if __name__ == "__main__":
         sys.exit("needs a working oc login")
     locale.setlocale(locale.LC_ALL, "")
     # A closed terminal or a kill runs the same cleanup as Ctrl-C: revoke the
-    # session's keys and delete its plans.
+    # session's keys.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
     signal.signal(signal.SIGHUP, lambda *_: sys.exit(1))
     try:
         curses.wrapper(main)
     except SystemExit:
         pass
-    print("session keys revoked and session plans deleted")
+    print("session keys revoked")

@@ -1,0 +1,13 @@
+# Assisted by Claude Opus
+# Registers the public OIDC client users sign in with.
+- name: Register or update the OIDC client
+  kubernetes.core.k8s_exec:
+    namespace: "{{ maas_namespace }}"
+    pod: "{{ _maas_pod }}"
+    container: keycloak
+    command: bash /tmp/maas-kcadm.sh oidc-client
+  register: _maas_kcadm
+
+- name: Report
+  ansible.builtin.debug:
+    msg: "{{ _maas_kcadm.stdout_lines }}"

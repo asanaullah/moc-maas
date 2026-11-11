@@ -1,13 +1,41 @@
 # Assisted by Claude Opus
-# Deletes tui-* plans whose keys are all gone, left behind by maas-tui.py
-# runs that were killed before their own cleanup ran.
-- name: Delete leftover TUI plans
-  kubernetes.core.k8s_exec:
-    namespace: "{{ maas_namespace }}"
-    pod: "{{ _maas_pod }}"
-    command: python3 /tmp/maas-api.py POST /api/plans/tui-cleanup '{}' {{ _maas_actor_b64 }}
-  register: _maas_api
+# Revokes every active key whose username starts with tui-, the identities
+# maas-tui.py creates.
+- name: List every key
+  ansible.builtin.include_tasks: maas-api.yml
+  vars:
+    _maas_api_method: POST
+    _maas_api_path: /v1/api-keys/search
+    _maas_api_body: {}
+
+- name: Start the user list
+  ansible.builtin.set_fact:
+    _maas_tui_users: []
+
+- name: Collect the TUI users with active keys
+  ansible.builtin.set_fact:
+    _maas_tui_users: "{{ _maas_tui_users + ([item.username] if item.status == 'active' and item.username.startswith('tui-') else []) }}"
+  loop: "{{ (_maas_api_output | from_json).data }}"
+  loop_control:
+    label: "{{ item.id }}"
+
+- name: Revoke each user's keys
+  ansible.builtin.include_tasks: maas-api.yml
+  vars:
+    _maas_api_method: POST
+    _maas_api_path: /v1/api-keys/bulk-revoke
+    _maas_api_body: {username: "{{ item }}"}
+  loop: "{{ _maas_tui_users }}"
+  loop_control:
+    label: "{{ item }}"
 
 - name: Report
   ansible.builtin.debug:
-    msg: "{{ _maas_api.stdout }}"
+    msg: "revoked the keys of {{ _maas_tui_users | length }} TUI user(s)"
+
+- name: Record the action
+  ansible.builtin.include_tasks: audit-write.yml
+  vars:
+    _maas_target: tui-keys
+    _maas_details:
+      users: "{{ _maas_tui_users | length }}"

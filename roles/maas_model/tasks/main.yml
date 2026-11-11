@@ -1,7 +1,6 @@
 # Assisted by Claude Opus
-# The model path. Limitador starts with no limits; the admin
-# portal writes them when it starts. The maas-limits ConfigMap is
-# the portal's to fill, so it is only created here, never applied over.
+# The model path. The governance role writes maas-limits, so it is only
+# created here when missing, never applied over.
 - name: Check the limits ConfigMap
   kubernetes.core.k8s_info:
     kind: ConfigMap
@@ -42,6 +41,8 @@
     tasks_from: wait_deployments
   vars:
     deployments: [maas-sim, maas-redis, maas-limitador, maas-epp]
+    # With leader election only the active EPP replica is Ready.
+    deployments_unavailable_ok: {maas-epp: 1}
 
 - name: Wait for the client pod
   ansible.builtin.include_role:

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
+# Assisted by Claude Opus
 """Renders the admin Grafana's two dashboards as a ConfigMap
 Grafana provisions from at startup, to stdout; deploy.yml applies it:
 
-  MaaS usage    tokens, requests and 429s per person and per application
-                (service key), share of budget, key inventory
+  MaaS usage    tokens, requests and 429s per user, subscription and model
   MaaS serving  replicas, load balancing across them, queues, latency, prefix
-                cache, gateway and key-check outcomes
+                cache, and gateway outcomes
 
 Edit this file, then re-run playbooks/deploy.yml (or just its Grafana play) to apply.
 Usage: gen-dashboards.py [namespace]
@@ -18,6 +18,19 @@ NS = sys.argv[1] if len(sys.argv) > 1 else "uat-project"
 
 DS = {"type": "prometheus", "uid": "maas-thanos"}
 _id = [0]
+
+
+def counter_total(metric, window="24h"):
+    """Counter change over the window, including a series' first sample when
+    the series was created inside it; increase() alone misses that value."""
+    return (f"sum(increase({metric}[{window}]))"
+            f" + sum(min_over_time({metric}[{window}]) unless {metric} offset {window})")
+
+
+def counter_total_by(metric, labels, window="24h"):
+    by = ", ".join(labels)
+    return (f"sum by ({by}) (increase({metric}[{window}]))"
+            f" + sum by ({by}) (min_over_time({metric}[{window}]) unless {metric} offset {window})")
 
 
 def panel(kind, title, targets, x, y, w, h, unit=None, desc=None, **extra):
@@ -40,41 +53,28 @@ def dashboard(uid, title, panels, desc):
             "panels": panels, "templating": {"list": []}}
 
 
-PEOPLE = 'user!~"service:.*"'
-APPS = 'user=~"service:.*"'
-
 usage = dashboard("maas-usage", "MaaS usage", [
-    panel("stat", "Tokens, last 24h", [("sum(increase(authorized_hits[24h]))", "")], 0, 0, 6, 4, "short"),
-    panel("stat", "Requests counted, last 24h", [("sum(increase(report_calls[24h]))", "")], 6, 0, 6, 4, "short"),
-    panel("stat", "Refused for budget (429), last 24h", [("sum(increase(limited_calls[24h]))", "")], 12, 0, 6, 4, "short"),
-    panel("stat", "Active keys", [('sum by (kind) (maas_keys{status="active"})', "{{kind}}")], 18, 0, 6, 4, "short"),
-    panel("timeseries", "People: tokens per minute", [(f"sum by (user) (rate(authorized_hits{{{PEOPLE}}}[5m])) * 60", "{{user}}")],
-          0, 4, 12, 8, "short", "Users' own keys. Counted from each response's token usage."),
-    panel("timeseries", "Applications (service keys): tokens per minute",
-          [(f"sum by (user) (rate(authorized_hits{{{APPS}}}[5m])) * 60", "{{user}}")], 12, 4, 12, 8, "short"),
-    panel("timeseries", "Refused for budget (429) per minute, by owner",
-          [("sum by (user) (rate(limited_calls[5m])) * 60", "{{user}}")], 0, 12, 12, 7, "short"),
-    panel("timeseries", "Share of budget, 5-minute average",
-          [("sum by (user, plan) (rate(authorized_hits[5m])) / on (plan) group_left "
-            "max by (plan) (maas_plan_budget_tokens / maas_plan_window_seconds)", "{{user}} ({{plan}})")],
-          12, 12, 12, 7, "percentunit", "Token rate as a share of the plan's budget rate. Above 100% means the owner is being refused."),
-    panel("table", "Tokens per owner and plan, last 24h",
-          [("sort_desc(sum by (user, plan) (increase(authorized_hits[24h])))", "")], 0, 19, 12, 9, "short",
+    panel("stat", "Tokens, last 24h", [(counter_total("authorized_hits"), "")], 0, 0, 8, 4, "short"),
+    panel("stat", "Requests counted, last 24h", [(counter_total("report_calls"), "")], 8, 0, 8, 4, "short"),
+    panel("stat", "Refused for budget (429), last 24h", [(counter_total("limited_calls"), "")], 16, 0, 8, 4, "short"),
+    panel("timeseries", "Tokens per minute by user",
+          [("sum by (user) (rate(authorized_hits[5m])) * 60", "{{user}}")], 0, 4, 12, 8, "short",
+          "Users' own keys; each response's token usage."),
+    panel("timeseries", "Tokens per minute by subscription",
+          [("sum by (subscription) (rate(authorized_hits[5m])) * 60", "{{subscription}}")], 12, 4, 12, 8, "short"),
+    panel("timeseries", "Tokens per minute by model",
+          [("sum by (model) (rate(authorized_hits[5m])) * 60", "{{model}}")], 0, 12, 12, 8, "short"),
+    panel("timeseries", "Refused for budget (429) per minute, by user",
+          [("sum by (user) (rate(limited_calls[5m])) * 60", "{{user}}")], 12, 12, 12, 8, "short"),
+    panel("table", "Tokens per user and subscription, last 24h",
+          [(f"sort_desc({counter_total_by('authorized_hits', ['user', 'subscription'])})", "")], 0, 20, 12, 9, "short",
           transformations=[{"id": "organize", "options": {"excludeByName": {"Time": True},
-                                                           "renameByName": {"user": "owner", "Value": "tokens"}}}]),
-    panel("table", "Keys", [("maas_key_info", "")], 12, 19, 12, 9, None,
-          "Every active key, with its owner, kind (user or service) and plan in force.",
-          transformations=[{"id": "organize", "options": {"excludeByName": {
-              "Time": True, "Value": True, "__name__": True, "instance": True, "job": True, "cluster": True,
-              "namespace": True, "prometheus": True, "key_id": True}}}]),
-    panel("table", "Plans", [("maas_plan_budget_tokens", "")], 0, 28, 12, 6, "short",
-          transformations=[{"id": "organize", "options": {"excludeByName": {
-              "Time": True, "__name__": True, "instance": True, "job": True, "cluster": True, "namespace": True,
-              "prometheus": True}, "renameByName": {"Value": "tokens per window"}}}]),
-    panel("timeseries", "Key checks by result", [("sum by (result) (rate(maas_key_checks_total[5m])) * 60", "{{result}}")],
-          12, 28, 12, 6, "short", "ok, invalid (bad, expired or revoked key), missing (no key), model_denied (model not in plan), "
-          "plan_inactive (Limitador hasn't loaded the plan), limits_unknown (Limitador unreachable)."),
-], "Usage per person and per application, against their plans' budgets.")
+                                                           "renameByName": {"Value": "tokens"}}}]),
+    panel("table", "Tokens per model, last 24h",
+          [(f"sort_desc({counter_total_by('authorized_hits', ['model'])})", "")], 12, 20, 12, 9, "short",
+          transformations=[{"id": "organize", "options": {"excludeByName": {"Time": True},
+                                                           "renameByName": {"Value": "tokens"}}}]),
+], "Usage per user, subscription and model.")
 
 _id[0] = 0
 serving = dashboard("maas-serving", "MaaS serving", [
@@ -83,8 +83,8 @@ serving = dashboard("maas-serving", "MaaS serving", [
           6, 0, 6, 4, "reqps"),
     panel("stat", "Median time to first token", [("histogram_quantile(0.5, sum by (le) (rate(llm_d_epp_request_ttft_seconds_bucket[5m])))", "")],
           12, 0, 6, 4, "s"),
-    panel("stat", "Gateway 5xx share", [('sum(rate(envoy_http_downstream_rq_xx{envoy_http_conn_manager_prefix=~"maas|maas-tls",envoy_response_code_class="5"}[5m])) '
-                                         '/ sum(rate(envoy_http_downstream_rq_total{envoy_http_conn_manager_prefix=~"maas|maas-tls"}[5m]))', "")],
+    panel("stat", "Gateway 5xx share", [(('sum(rate(envoy_http_downstream_rq_xx{envoy_http_conn_manager_prefix=~"maas|maas-tls",envoy_response_code_class="5"}[5m])) '
+                                          '/ sum(rate(envoy_http_downstream_rq_total{envoy_http_conn_manager_prefix=~"maas|maas-tls"}[5m]))'), "")],
           18, 0, 6, 4, "percentunit"),
     panel("timeseries", "Requests per replica (load balancing)",
           [("sum by (endpoint_name) (rate(llm_d_epp_scheduler_attempts_total[5m]))", "{{endpoint_name}}")], 0, 4, 12, 8, "reqps",
@@ -97,42 +97,23 @@ serving = dashboard("maas-serving", "MaaS serving", [
     panel("timeseries", "Time to first token", [
         ("histogram_quantile(0.5, sum by (le) (rate(llm_d_epp_request_ttft_seconds_bucket[5m])))", "p50"),
         ("histogram_quantile(0.95, sum by (le) (rate(llm_d_epp_request_ttft_seconds_bucket[5m])))", "p95")], 12, 12, 12, 8, "s"),
-    panel("timeseries", "Median time to first token, per owner",
-          [("histogram_quantile(0.5, sum by (le, fairness_id) (rate(llm_d_epp_request_ttft_seconds_bucket[5m])))", "{{fairness_id}}")],
-          0, 20, 12, 8, "s", "By the key's owner (the picker's fairness ID)."),
     panel("timeseries", "Prefix-cache hit ratio (median)",
           [("histogram_quantile(0.5, sum by (le) (rate(llm_d_epp_prefix_indexer_hit_ratio_bucket[5m])))", "hit ratio")],
-          12, 20, 12, 8, "percentunit", "How much of each prompt the chosen replica already had cached; chat traffic sticks to one replica for this."),
+          0, 20, 12, 8, "percentunit", "How much of each prompt the chosen replica already had cached; chat traffic sticks to one replica for this."),
+    panel("timeseries", "Pool balance (standard deviation across replicas)",
+          [("max(llm_d_epp_std_dev_queue_size)", "queue"), ("max(llm_d_epp_std_dev_running_requests)", "running")],
+          12, 20, 12, 8, "short", "Zero means perfectly even load."),
     panel("timeseries", "Gateway responses by status class",
           [('sum by (envoy_response_code_class) (rate(envoy_http_downstream_rq_xx{envoy_http_conn_manager_prefix=~"maas|maas-tls"}[5m]))',
             "{{envoy_response_code_class}}xx")], 0, 28, 12, 7, "reqps"),
-    panel("timeseries", "Key-check connection failures",
-          [('rate(envoy_cluster_upstream_cx_connect_fail{envoy_cluster_name="maas_keys"}[5m])', "connect failures")],
-          0, 35, 12, 6, "reqps", "Should stay at zero; a rising line means the key checker is refusing connections."),
-    panel("timeseries", "Picker refusals by flow-control result",
-          [('sum by (result) (rate(llm_d_epp_flow_control_requests_total[5m])) * 60', "{{result}}")],
-          12, 35, 12, 6, "reqps", "Capacity refusals from the pool, distinct from budget refusals (429s the token budget causes)."),
-    panel("timeseries", "Pool balance (standard deviation across replicas)",
-          [("max(llm_d_epp_std_dev_queue_size)", "queue"), ("max(llm_d_epp_std_dev_running_requests)", "running")],
-          12, 28, 12, 7, "short", "Zero means perfectly even load."),
-    # Health: the conditions worth an alert, visible without one.
-    {"id": 100, "type": "row", "title": "Health", "collapsed": False, "gridPos": {"x": 0, "y": 41, "w": 24, "h": 1},
+    panel("timeseries", "Upstream connection failures",
+          [("sum by (envoy_cluster_name) (rate(envoy_cluster_upstream_cx_connect_fail{envoy_cluster_name=~\"authorino|limitador|ipp_pre|ipp_post|epp|model-.*\"}[5m]))",
+            "{{envoy_cluster_name}}")], 12, 28, 12, 7, "reqps", "Should stay at zero; a rising line means a gateway dependency is refusing connections."),
+    {"id": 100, "type": "row", "title": "Health", "collapsed": False, "gridPos": {"x": 0, "y": 36, "w": 24, "h": 1},
      "panels": []},
-    panel("stat", "Since the last reconciler pass", [("time() - max(maas_reconcile_last_success_timestamp_seconds)", "")],
-          0, 42, 6, 4, "s", "Should stay under 30 minutes; the reconciler runs every 10."),
-    panel("stat", "Plans without a loaded limit", [("count(maas_plan_limit_loaded == 0) or vector(0)", "")],
-          6, 42, 6, 4, "short", "A plan Limitador hasn't loaded refuses every request (403 plan not active yet)."),
     panel("stat", "Storage volume free", [("min(maas_volume_free_bytes / maas_volume_size_bytes)", "")],
-          12, 42, 6, 4, "percentunit", "Below 15% needs attention: the databases and backups share this volume."),
-    panel("stat", "Portal database connections", [("max(maas_db_connections / maas_db_max_connections)", "")],
-          18, 42, 6, 4, "percentunit", "Share of max_connections in use; above 80% needs attention."),
-    panel("timeseries", "Gateway rate cap refusals", [
-        ('sum(rate(envoy_http_local_rate_limit_rate_limited{envoy_local_http_ratelimit_prefix="maas_local_rate_limit"}[5m]))'
-         ' or sum(rate(envoy_maas_local_rate_limit_http_local_rate_limit_rate_limited[5m]))', "refused")],
-          0, 46, 12, 6, "reqps", "Requests over a gateway pod's own rate cap (429 x-maas-refusal: gateway-busy)."),
-    panel("stat", "Reconciler refusals", [("max(maas_reconcile_refused_users)", "")],
-          12, 46, 12, 6, "short", "Non-zero: the last pass found most users gone in Keycloak and revoked nothing; check Keycloak."),
-    panel("table", "Firing alerts", [('ALERTS{alertstate="firing"}', "")], 0, 52, 24, 8, None,
+          0, 37, 8, 4, "percentunit", "Below 15% needs attention: the databases and backups share this volume."),
+    panel("table", "Firing alerts", [('ALERTS{alertstate="firing"}', "")], 8, 37, 16, 8, None,
           "Alerts the MaaS Prometheus evaluates (manifests/prometheus.yaml, alerts.yml).",
           transformations=[{"id": "organize", "options": {"excludeByName": {
               "Time": True, "Value": True, "__name__": True, "alertstate": True, "cluster": True,

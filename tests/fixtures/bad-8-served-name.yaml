@@ -1,0 +1,19 @@
+# Assisted by Claude Opus
+- apiVersion: maas.opendatahub.io/v1alpha1
+  kind: MaaSModelRef
+  metadata: {name: maas-sim}
+  spec: {modelRef: {kind: LLMInferenceService, name: maas-sim}}
+- apiVersion: maas.opendatahub.io/v1alpha1
+  kind: MaaSSubscription
+  metadata: {name: standard}
+  spec:
+    owner: {groups: [{name: maas-standard}], users: []}
+    priority: 10
+    modelRefs:
+      - {name: maas-sim, namespace: parity-ns, tokenRateLimits: [{limit: 1000, window: 1h}]}
+- apiVersion: maas.opendatahub.io/v1alpha1
+  kind: MaaSAuthPolicy
+  metadata: {name: standard-access}
+  spec:
+    subjects: {groups: [{name: maas-standard}], users: []}
+    modelRefs: [{name: maas-sim, namespace: parity-ns}]

@@ -1,0 +1,31 @@
+# Assisted by Claude Opus
+# One call against maas-api on the gateway pod's localhost, with the reserved
+# admin group in the identity headers. Sets _maas_api_status and
+# _maas_api_output for the action.
+- name: Call maas-api
+  kubernetes.core.k8s_exec:
+    namespace: "{{ maas_namespace }}"
+    pod: "{{ _maas_pod }}"
+    container: key-cleanup
+    command: >-
+      curl -sS -w '\n%{http_code}' -X {{ _maas_api_method | default('POST') }}
+      http://127.0.0.1:{{ maas_api_port }}{{ _maas_api_path }}
+      -H 'X-MaaS-Username: {{ _maas_api_actor | default(_maas_actor) }}'
+      -H 'X-MaaS-Group: {{ _maas_api_groups | default('["' ~ maas_admin_group ~ '"]') }}'
+      -H 'Content-Type: application/json'
+      {% if _maas_api_body is defined %}-d '{{ _maas_api_body | to_json }}'{% endif %}
+  register: _maas_api
+  no_log: "{{ _maas_api_secret | default(false) }}"
+  failed_when: false
+  changed_when: false
+
+- name: Split the answer
+  ansible.builtin.set_fact:
+    _maas_api_status: "{{ _maas_api.stdout_lines[-1] | default('') }}"
+    _maas_api_output: "{{ _maas_api.stdout_lines[:-1] | join('\n') }}"
+
+- name: Fail unless maas-api succeeded
+  ansible.builtin.assert:
+    that: _maas_api_status is match('^2')
+    fail_msg: "maas-api answered {{ _maas_api_status }} (curl exit {{ _maas_api.rc }}): {{ _maas_api_output | default('') | truncate(500) }}"
+    quiet: true

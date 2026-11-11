@@ -1,0 +1,14 @@
+# Assisted by Claude Opus
+- name: Re-render the governance data
+  ansible.builtin.include_role:
+    name: maas_governance
+
+- name: Restart the gateway onto the new configuration
+  ansible.builtin.include_role:
+    name: maas_gateway
+
+- name: Record the action
+  ansible.builtin.include_tasks: audit-write.yml
+  vars:
+    _maas_target: governance
+    _maas_details: {}

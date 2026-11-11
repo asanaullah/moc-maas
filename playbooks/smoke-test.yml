@@ -1,9 +1,9 @@
 # Assisted by Claude Opus
-# Runs the smoke test against a deployed MaaS: one short-lived service key on
-# a dedicated tiny plan, every expected answer checked through the public
-# gateway Route, then the key revoked and the plan deleted. deploy.yml runs
-# this after every deploy where the public Routes exist; it can also be run
-# by hand:
+# Runs the smoke test against a deployed MaaS: a Keycloak user and group, a
+# small subscription, every expected answer checked through the public
+# gateway Route, then the user, group and subscription removed. deploy.yml
+# runs this after every deploy where the public Routes exist; it can also be
+# run by hand:
 #
 #   ansible-playbook -i clusters/<cluster>.yml playbooks/smoke-test.yml
 #
@@ -11,6 +11,7 @@
 - name: Smoke-test the MaaS
   hosts: localhost
   gather_facts: false
+  tags: [smoke]
   # maas_common contributes only shared defaults (the gateway's URL among
   # them); it has no tasks of its own.
   roles:

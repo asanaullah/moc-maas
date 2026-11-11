@@ -1,0 +1,24 @@
+- name: parity-ns-standard-maas-sim-tokens
+  namespace: parity-ns/maas-sim
+  max_value: 24000
+  seconds: 86400
+  conditions:
+  - descriptors[0]["tokenlimit.parity_ns_standard_maas_sim_tokens__d1e37112"] == "1"
+  variables:
+  - descriptors[0]["auth.identity.userid"]
+- name: parity-ns-standard-maas-sim-tokens
+  namespace: parity-ns/maas-sim
+  max_value: 2000
+  seconds: 3600
+  conditions:
+  - descriptors[0]["tokenlimit.parity_ns_standard_maas_sim_tokens__d1e37112"] == "1"
+  variables:
+  - descriptors[0]["auth.identity.userid"]
+- name: parity-ns-free-maas-sim-tokens
+  namespace: parity-ns/maas-sim
+  max_value: 1000
+  seconds: 3600
+  conditions:
+  - descriptors[0]["tokenlimit.parity_ns_free_maas_sim_tokens__6b9239d1"] == "1"
+  variables:
+  - descriptors[0]["auth.identity.userid"]

@@ -1,0 +1,37 @@
+# Assisted by Claude Opus
+- name: Check the arguments
+  ansible.builtin.assert:
+    that:
+      - maas_model is defined
+      - maas_model is match('^[a-z0-9][a-z0-9._-]{0,62}$')
+      - maas_served_name | default(maas_model) is match('^[A-Za-z0-9._:/-]+$')
+    fail_msg: set maas_model, and optionally maas_served_name
+    quiet: true
+
+- name: Read the governance data
+  ansible.builtin.include_tasks: governance-read.yml
+
+- name: Write the model
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ role_path }}/files/governance_edit.py"
+      - --file
+      - "{{ _maas_gov_file.path }}"
+      - model-set
+      - --name
+      - "{{ maas_model }}"
+      - --served-name
+      - "{{ maas_served_name | default(maas_model) }}"
+  register: _maas_gov_edit
+  changed_when: _maas_gov_edit.rc == 0
+
+- name: Save and re-render
+  ansible.builtin.include_tasks: governance-save.yml
+
+- name: Record the action
+  ansible.builtin.include_tasks: audit-write.yml
+  vars:
+    _maas_target: "model/{{ maas_model }}"
+    _maas_details:
+      served_name: "{{ maas_served_name | default(maas_model) }}"

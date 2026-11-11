@@ -10,7 +10,6 @@ maas_ready_timeout: 300
 maas_backup_timeout: 600
 maas_poll_delay: 5
 
-maas_keys_host: "maas-keys-{{ maas_namespace }}.{{ maas_apps_domain }}"
 maas_sso_host: "maas-sso-{{ maas_namespace }}.{{ maas_apps_domain }}"
 maas_gateway_host: "maas-gateway-{{ maas_namespace }}.{{ maas_apps_domain }}"
 maas_usage_host: "maas-usage-{{ maas_namespace }}.{{ maas_apps_domain }}"
@@ -33,7 +32,31 @@ maas_route_rate_http: 100
 # cut them. Check it against the gateway's access log:
 #   oc logs -n <ns> -l app=maas-gateway --since=24h | grep -oE '"duration_ms":"?[0-9]+' | grep -oE '[0-9]+$' | sort -n | tail -1
 maas_gateway_drain_seconds: 120
-# The gateway's own request-rate cap per pod, in front of the key check:
-# requests per second, and the burst it allows.
-maas_gateway_rate_per_second: 200
-maas_gateway_rate_burst: 400
+
+maas_image_maas_api: "registry.redhat.io/rhoai/odh-maas-api-rhel9@sha256:a7e5a87a6e64b1e99bceaf9c1f4e0ece6f3b7f8ce8227edd59586f7344c385ee"
+maas_image_ipp: "registry.redhat.io/rhoai/odh-ai-gateway-payload-processing-rhel9@sha256:32a3989352edf096214dbe9bd20fc38bf3eb04fd1cb328c64b7b19dd312bb841"
+maas_image_epp: "registry.redhat.io/rhoai/odh-llm-d-router-endpoint-picker-rhel9@sha256:576be540566ad2ddeb0b45866a48c8df80bd334dd2b2844578df601ca74fff7c"
+maas_image_authorino: "registry.redhat.io/rhcl-1/authorino-rhel9@sha256:fb72464b7c88f036afad7667ccdbe7a465919a5722f492e7da3598399ac13c16"
+maas_image_limitador: "registry.redhat.io/rhcl-1/limitador-rhel9@sha256:5ce716d90f7e944720a5d1a6c133d13b1caf6c4f43850778a0d14ea1e395c8aa"
+maas_image_wasm_shim: "registry.access.redhat.com/rhcl-1/wasm-shim-rhel9@sha256:017cc5d6399f649ae6b200d0248b72074b01fb06c7c0e7ced56a9db1b304c5c3"
+maas_image_envoy: "registry.redhat.io/openshift-service-mesh/istio-proxyv2-rhel9@sha256:562d4cca9224679716e20233f39fa9328a49f7ce33af70e39fd9426a28899b3d"
+maas_image_etcd: "quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:ac7243bb434d9639dcda6df9b91206beca94422ae76bb6c8875342e11e36bf67"
+maas_image_kube_apiserver: "quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:0e3660b9c55ecf7b035289363e741b57f77008ca548cb4f74d7bf593333497fc"
+maas_image_cli: "quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:b4e48cec3040a0f18fe5697e128d8deb1c9409c28b6b3249c789f7beaba10fea"
+maas_gateway_name: maas-gateway
+maas_gateway_replicas: 2
+maas_envoy_concurrency: 2
+maas_authconfig_name: maas-gateway-auth
+maas_tenant_name: models-as-a-service
+maas_oidc_client_id: maas-oidc
+maas_admin_group: maas-local-admin
+maas_api_port: 8090
+maas_api_metrics_port: 9091
+maas_kube_port: 6443
+maas_cache_ttl: 60
+maas_api_key_max_days: 90
+maas_key_cleanup_seconds: 900
+maas_body_limit_bytes: 4194304
+maas_auth_timeout: 10s
+maas_ratelimit_timeout: 100ms
+maas_model_paths: ["/v1/chat/completions", "/v1/completions", "/v1/embeddings"]

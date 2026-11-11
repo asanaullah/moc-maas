@@ -59,20 +59,42 @@ data:
           - names: [maas-metrics-gateway.{{ maas_namespace }}.svc.cluster.local]
             type: A
             port: 9901
-      - job_name: key-portal
+      - job_name: authorino
+        dns_sd_configs:
+          - names: [maas-metrics-authorino.{{ maas_namespace }}.svc.cluster.local]
+            type: A
+            port: 8082
+      - job_name: maas-api
+        dns_sd_configs:
+          - names: [maas-metrics-maas-api.{{ maas_namespace }}.svc.cluster.local]
+            type: A
+            port: 9091
+      - job_name: usage
+        dns_sd_configs:
+          - names: [maas-metrics-usage.{{ maas_namespace }}.svc.cluster.local]
+            type: A
+            port: 9100
+      - job_name: ipp
+        scheme: http
+        authorization:
+          type: Bearer
+          credentials_file: /etc/maas-kube-token/token
+        dns_sd_configs:
+          - names:
+              - maas-metrics-ipp-pre.{{ maas_namespace }}.svc.cluster.local
+              - maas-metrics-ipp-post.{{ maas_namespace }}.svc.cluster.local
+            type: A
+            port: 9090
+      - job_name: maas-kube
         scheme: https
         tls_config:
           ca_file: /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt
-          server_name: maas-keys.{{ maas_namespace }}.svc
-        dns_sd_configs:
-          - names: [maas-metrics-keys.{{ maas_namespace }}.svc.cluster.local]
-            type: A
-            port: 8081
-      - job_name: admin-portal
-        dns_sd_configs:
-          - names: [maas-metrics-admin.{{ maas_namespace }}.svc.cluster.local]
-            type: A
-            port: 9100
+          server_name: maas-kube.{{ maas_namespace }}.svc
+        authorization:
+          type: Bearer
+          credentials_file: /etc/maas-kube-token/token
+        static_configs:
+          - targets: ["maas-kube.{{ maas_namespace }}.svc.cluster.local:6443"]
       - job_name: keycloak
         scheme: https
         tls_config:
@@ -102,53 +124,12 @@ data:
             labels: {severity: warning}
             annotations:
               summary: "{{ '{{' }} $labels.job {{ '}}' }} target {{ '{{' }} $labels.instance {{ '}}' }} has been unreachable for 5 minutes"
-          - alert: MaasReconcilerStopped
-            expr: time() - max(maas_reconcile_last_success_timestamp_seconds) > 1800
-            for: 5m
-            labels: {severity: warning}
-            annotations:
-              summary: "The key reconciler hasn't finished a pass for 30 minutes; removed or disabled users keep their keys"
-          - alert: MaasReconcilerMissing
-            expr: absent(maas_reconcile_last_success_timestamp_seconds)
-            for: 15m
-            labels: {severity: warning}
-            annotations:
-              summary: "No reconciler metric from the admin portal for 15 minutes"
-          - alert: MaasReconcilerRefused
-            expr: max(maas_reconcile_refused_users) > 0
-            labels: {severity: critical}
-            annotations:
-              summary: "The reconciler found most users gone in Keycloak and revoked nothing; check Keycloak before it is fixed"
-          - alert: MaasPlanHasNoBudget
-            expr: maas_plan_limit_loaded == 0
-            for: 2m
-            labels: {severity: critical}
-            annotations:
-              summary: "Limitador has no limit for plan {{ '{{' }} $labels.plan {{ '}}' }}; its users get 403 plan not active yet"
-          - alert: MaasLimitsUnknown
-            expr: sum(rate(maas_key_checks_total{result="limits_unknown"}[5m])) > 0
-            for: 5m
-            labels: {severity: critical}
-            annotations:
-              summary: "The key check can't read Limitador's limits; requests get 503"
-          - alert: MaasKeyCheckConnectFailures
-            expr: sum(rate(envoy_cluster_upstream_cx_connect_fail{envoy_cluster_name="maas_keys"}[5m])) > 0
-            for: 5m
-            labels: {severity: critical}
-            annotations:
-              summary: "The gateway can't connect to the key check"
           - alert: MaasVolumeFillingUp
             expr: maas_volume_free_bytes / maas_volume_size_bytes < 0.15
             for: 10m
             labels: {severity: warning}
             annotations:
               summary: "Volume {{ '{{' }} $labels.volume {{ '}}' }} has less than 15% free; the databases and backups live there"
-          - alert: MaasPortalDatabaseConnectionsHigh
-            expr: maas_db_connections / maas_db_max_connections > 0.8
-            for: 5m
-            labels: {severity: warning}
-            annotations:
-              summary: "The portal database uses over 80% of max_connections"
           - alert: MaasMetricsUploadFailing
             expr: increase(thanos_shipper_upload_failures_total[1h]) > 0
             labels: {severity: warning}
@@ -206,6 +187,7 @@ spec:
           volumeMounts:
             - {name: data, mountPath: /prometheus}
             - {name: config, mountPath: /etc/prometheus, readOnly: true}
+            - {name: kube-token, mountPath: /etc/maas-kube-token, readOnly: true}
           resources:
             requests: {cpu: 100m, memory: 512Mi}
             limits: {cpu: "1", memory: 2Gi}
@@ -251,6 +233,8 @@ spec:
           configMap: {name: maas-s3-ca}
         - name: grpc-tls
           secret: {secretName: maas-thanos-grpc-tls}
+        - name: kube-token
+          secret: {secretName: maas-kube-token-prometheus}
 ---
 apiVersion: v1
 kind: Service
@@ -308,13 +292,28 @@ spec: {clusterIP: None, selector: {app: maas-gateway}, ports: [{name: metrics, p
 ---
 apiVersion: v1
 kind: Service
-metadata: {name: maas-metrics-keys, namespace: "{{ maas_namespace }}", labels: {app.kubernetes.io/part-of: maas-test}}
-spec: {clusterIP: None, selector: {app: maas-keys}, ports: [{name: metrics, port: 8081}]}
+metadata: {name: maas-metrics-authorino, namespace: "{{ maas_namespace }}", labels: {app.kubernetes.io/part-of: maas-test}}
+spec: {clusterIP: None, selector: {app: maas-gateway}, ports: [{name: metrics, port: 8082}]}
 ---
 apiVersion: v1
 kind: Service
-metadata: {name: maas-metrics-admin, namespace: "{{ maas_namespace }}", labels: {app.kubernetes.io/part-of: maas-test}}
-spec: {clusterIP: None, selector: {app: maas-admin}, ports: [{name: metrics, port: 9100}]}
+metadata: {name: maas-metrics-maas-api, namespace: "{{ maas_namespace }}", labels: {app.kubernetes.io/part-of: maas-test}}
+spec: {clusterIP: None, selector: {app: maas-gateway}, ports: [{name: metrics, port: 9091}]}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: maas-metrics-usage, namespace: "{{ maas_namespace }}", labels: {app.kubernetes.io/part-of: maas-test}}
+spec: {clusterIP: None, selector: {app: maas-usage}, ports: [{name: metrics, port: 9100}]}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: maas-metrics-ipp-pre, namespace: "{{ maas_namespace }}", labels: {app.kubernetes.io/part-of: maas-test}}
+spec: {clusterIP: None, selector: {app: maas-ipp-pre}, ports: [{name: metrics, port: 9090}]}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: maas-metrics-ipp-post, namespace: "{{ maas_namespace }}", labels: {app.kubernetes.io/part-of: maas-test}}
+spec: {clusterIP: None, selector: {app: maas-ipp-post}, ports: [{name: metrics, port: 9090}]}
 ---
 apiVersion: v1
 kind: Service

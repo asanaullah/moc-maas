@@ -1,0 +1,58 @@
+# Assisted by Claude Opus
+# Runs the plan. Changes always run; removals only when maas_sync_prune is on.
+- name: Create the missing Keycloak groups
+  kubernetes.core.k8s_exec:
+    namespace: "{{ maas_namespace }}"
+    pod: "{{ _maas_pod }}"
+    container: keycloak
+    command: "bash /tmp/maas-kcadm.sh group-create {{ item.group }}"
+  loop: "{{ _sync_plan.changes | selectattr('kind', 'equalto', 'group-create') | list }}"
+  loop_control:
+    label: "{{ item.group }}"
+
+- name: Write the subscriptions
+  ansible.builtin.include_role:
+    name: maas_admin
+  vars:
+    maas_admin_action: subscription-set
+    maas_subscription: "{{ item.name }}"
+    maas_groups: "{{ item.groups | join(',') }}"
+    maas_limits: "{{ item.limits }}"
+    maas_priority: "{{ item.priority }}"
+    maas_models: "{{ item.models | join(',') }}"
+    maas_users: "{{ item.users | join(',') }}"
+  loop: "{{ _sync_plan.changes | selectattr('kind', 'equalto', 'subscription-set') | list }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Add the users to their groups
+  kubernetes.core.k8s_exec:
+    namespace: "{{ maas_namespace }}"
+    pod: "{{ _maas_pod }}"
+    container: keycloak
+    command: "bash /tmp/maas-kcadm.sh add {{ item.email }} {{ item.group }}"
+  loop: "{{ _sync_plan.changes | selectattr('kind', 'equalto', 'membership-add') | list }}"
+  loop_control:
+    label: "{{ item.email }}"
+
+- name: Remove the extra memberships
+  kubernetes.core.k8s_exec:
+    namespace: "{{ maas_namespace }}"
+    pod: "{{ _maas_pod }}"
+    container: keycloak
+    command: "bash /tmp/maas-kcadm.sh remove {{ item.email }} {{ item.group }}"
+  loop: "{{ _sync_plan.removals | selectattr('kind', 'equalto', 'membership-remove') | list }}"
+  loop_control:
+    label: "{{ item.email }}"
+  when: maas_sync_prune | bool
+
+- name: Delete the extra subscriptions
+  ansible.builtin.include_role:
+    name: maas_admin
+  vars:
+    maas_admin_action: subscription-delete
+    maas_subscription: "{{ item.name }}"
+  loop: "{{ _sync_plan.removals | selectattr('kind', 'equalto', 'subscription-delete') | list }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: maas_sync_prune | bool

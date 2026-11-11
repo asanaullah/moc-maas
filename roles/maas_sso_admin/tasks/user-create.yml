@@ -1,0 +1,26 @@
+# Assisted by Claude Opus
+# Creates a realm user with a password and joins it to a group. The password
+# is passed in the command string, which the task hides (no_log).
+- name: Check the arguments
+  ansible.builtin.assert:
+    that:
+      - maas_user is defined
+      - maas_user is match('^[A-Za-z0-9._@-]+$')
+      - maas_group is defined
+      - maas_group is match('^[A-Za-z0-9:._-]+$')
+      - maas_password is defined
+    fail_msg: set maas_user, maas_group and maas_password
+    quiet: true
+
+- name: Create the user and add it to the group
+  kubernetes.core.k8s_exec:
+    namespace: "{{ maas_namespace }}"
+    pod: "{{ _maas_pod }}"
+    container: keycloak
+    command: "bash -c 'SMOKE_PASSWORD=\"{{ maas_password }}\" bash /tmp/maas-kcadm.sh user-create {{ maas_user }} {{ maas_group }}'"
+  register: _maas_kcadm
+  no_log: true
+
+- name: Report
+  ansible.builtin.debug:
+    msg: "{{ _maas_kcadm.stdout_lines }}"

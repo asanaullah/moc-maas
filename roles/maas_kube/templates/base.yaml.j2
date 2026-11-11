@@ -1,0 +1,166 @@
+# Assisted by Claude Opus
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: "{{ maas_namespace }}"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: maas-api
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["subjectaccessreviews"]
+    verbs: ["create"]
+  - apiGroups: ["maas.opendatahub.io"]
+    resources: ["maasauthpolicies", "maasmodelrefs", "maassubscriptions"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods", "services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: maas-api
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: maas-api}
+subjects:
+  - {apiGroup: rbac.authorization.k8s.io, kind: User, name: maas-api}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: maas-authorino
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["authorino.kuadrant.io"]
+    resources: ["authconfigs"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+  - apiGroups: ["authorino.kuadrant.io"]
+    resources: ["authconfigs/status"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create", "get", "list", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: maas-authorino
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: maas-authorino}
+subjects:
+  - {apiGroup: rbac.authorization.k8s.io, kind: User, name: maas-authorino}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: maas-ipp
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["maas.opendatahub.io"]
+    resources: ["externalmodels"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["maas.opendatahub.io"]
+    resources: ["externalmodels/finalizers"]
+    verbs: ["update"]
+  - apiGroups: ["inference.opendatahub.io"]
+    resources: ["externalproviders", "externalmodels"]
+    verbs: ["get", "list", "watch", "create", "update"]
+  - apiGroups: ["inference.opendatahub.io"]
+    resources: ["externalproviders/status", "externalmodels/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["inference.opendatahub.io"]
+    resources: ["externalproviders/finalizers", "externalmodels/finalizers"]
+    verbs: ["update"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+  - apiGroups: ["networking.istio.io"]
+    resources: ["serviceentries", "destinationrules"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create", "get", "list", "watch", "update"]
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["subjectaccessreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: maas-ipp
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: maas-ipp}
+subjects:
+  - {apiGroup: rbac.authorization.k8s.io, kind: User, name: maas-ipp}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: maas-prometheus
+rules:
+  - nonResourceURLs: ["/metrics"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: maas-prometheus
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: maas-prometheus}
+subjects:
+  - {apiGroup: rbac.authorization.k8s.io, kind: User, name: maas-prometheus}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: maas-local-admin
+rules:
+  - apiGroups: ["maas.opendatahub.io"]
+    resources: ["maasauthpolicies"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: maas-local-admin
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: maas-local-admin}
+subjects:
+  - {apiGroup: rbac.authorization.k8s.io, kind: Group, name: "{{ maas_admin_group }}"}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: "{{ maas_gateway_name }}"
+  namespace: "{{ maas_namespace }}"
+  labels:
+    gateway.networking.k8s.io/gateway-name: "{{ maas_gateway_name }}"
+  ownerReferences:
+    - apiVersion: gateway.networking.k8s.io/v1
+      kind: Gateway
+      name: "{{ maas_gateway_name }}"
+      uid: 00000000-0000-4000-8000-000000000001
+spec:
+  ports:
+    - name: https
+      port: 443

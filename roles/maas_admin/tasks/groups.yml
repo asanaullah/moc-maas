@@ -1,6 +1,0 @@
-# Assisted by Claude Opus
-# Which Keycloak group is mapped to which plan.
-- name: List the group-to-plan mappings
-  ansible.builtin.include_tasks: get-list.yml
-  vars:
-    _maas_path: /api/groups

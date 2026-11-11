@@ -1,0 +1,5 @@
+maasmodelref.maas.opendatahub.io maas-sim {"status":{"phase":"Ready","resolvedModelAlias":"publishers/parity-ns/models/maas-sim","endpoint":"https://maas-gateway-parity-ns.apps.example.com"}}
+maassubscription.maas.opendatahub.io standard {"status":{"phase":"Active"}}
+maassubscription.maas.opendatahub.io free {"status":{"phase":"Active"}}
+maasauthpolicy.maas.opendatahub.io standard-access {"status":{"phase":"Active"}}
+maasauthpolicy.maas.opendatahub.io free-access {"status":{"phase":"Active"}}
