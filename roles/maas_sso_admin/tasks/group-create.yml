@@ -15,6 +15,15 @@
     command: "bash /tmp/maas-kcadm.sh group-create {{ maas_group }}"
   register: _maas_kcadm
 
+- name: Record the action
+  ansible.builtin.include_role:
+    name: maas_admin
+    tasks_from: audit-write.yml
+  vars:
+    _maas_action: group-create
+    _maas_target: "group/{{ maas_group }}"
+    _maas_details: {}
+
 - name: Report
   ansible.builtin.debug:
     msg: "{{ _maas_kcadm.stdout_lines }}"
