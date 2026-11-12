@@ -2,6 +2,12 @@
 # Namespaces and the apps domain come from the cluster inventory (clusters/);
 # these defaults only carry derivations and tuning.
 maas_part_of: maas-test
+# Deployment target guard: the API server this inventory may change, an
+# optional server that must never be changed, and the confirmation every
+# mutating playbook requires.
+maas_expected_oc_server: ""
+maas_protected_oc_server: ""
+maas_confirm_deploy: false
 # The playbooks live in playbooks/ one level below the repository root, where
 # manifests/ sits next to them.
 maas_manifests_dir: "{{ playbook_dir | dirname }}/manifests"

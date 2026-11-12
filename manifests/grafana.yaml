@@ -56,6 +56,7 @@ spec:
         app.kubernetes.io/part-of: maas-test
         app: maas-grafana
     spec:
+      automountServiceAccountToken: false
       containers:
         - name: grafana
           image: docker.io/grafana/grafana@sha256:62d2b9d20a19714ebfe48d1bb405086081bc602aa053e28cf6d73c7537640dfb

@@ -19,6 +19,7 @@ spec:
         app.kubernetes.io/part-of: maas-test
         app: maas-redis
     spec:
+      automountServiceAccountToken: false
       containers:
         - name: redis
           image: docker.io/library/redis@sha256:a7aad82554197a54c653388bfded882a59d6b4a02468484bc31bae6772dcc42c

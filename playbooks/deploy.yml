@@ -14,6 +14,16 @@
 # The public addresses are installed too when asked for:
 #
 #   ansible-playbook -i clusters/oac-dev-workload0.yml playbooks/deploy.yml -e maas_routes=true
+- name: Deployment target
+  hosts: localhost
+  gather_facts: false
+  tags: [always]
+  tasks:
+    - name: Check the deployment target
+      ansible.builtin.include_role:
+        name: maas_common
+        tasks_from: preflight
+
 - name: Secrets
   hosts: localhost
   gather_facts: false

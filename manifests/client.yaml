@@ -9,6 +9,7 @@ metadata:
     app.kubernetes.io/part-of: maas-test
     app: maas-client
 spec:
+  automountServiceAccountToken: false
   shareProcessNamespace: true
   containers:
     - name: client
