@@ -184,7 +184,7 @@ ansible-playbook -i clusters/<cluster>.yml playbooks/first-plan.yml
 
 The GitHub OAuth App's client ID and secret (`MOC_MAAS_CLIENTID`, `MOC_MAAS_SECRET`) are only needed while `maas-sso-github` doesn't exist yet. `playbooks/github-secret.yml` creates or rotates it on purpose. Secret values are never printed.
 
-Tearing down without a wipe keeps the databases and the generated Secrets they need. To redeploy from scratch, run `playbooks/teardown.yml -e maas_wipe_data=true` first.
+Tearing down without a wipe keeps the databases, the generated Secrets they need and the `maas-governance` ConfigMap with its model refs and subscriptions. A fresh install seeds the model ref and the base `standard` and `tui-*` subscriptions from the role defaults. To redeploy from scratch, run `playbooks/teardown.yml -e maas_wipe_data=true` first.
 
 `deploy.yml` runs one play per component, in dependency order (each play has a tag, so a single part can be re-run):
 
