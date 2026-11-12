@@ -25,6 +25,10 @@ Deployment and administration are Ansible playbooks. The interactive helpers are
 
 ## Architecture
 
+![Architecture diagram](docs/architecture.svg)
+
+Every MaaS component is namespaced; the deploy creates nothing cluster-scoped.
+
 | Group | Component | Image | Role |
 |---|---|---|---|
 | Gateway pod | Envoy | Service Mesh `proxyv2` (Istio 1.28.10) | HTTP filters: header guard, 4 MiB body limit, payload pre-stage, wasm-shim, payload post-stage, endpoint picker |
@@ -46,6 +50,10 @@ Deployment and administration are Ansible playbooks. The interactive helpers are
 Ansible does the work of maas-controller and the Kuadrant operator here: it renders the AuthConfig, Limitador's limits and the wasm-shim configuration from the governance ConfigMap (`roles/maas_governance/files/render.py`).
 
 ### One request
+
+![Request path](docs/request-flow.svg)
+
+Every caller uses the same Route, identity and budget path.
 
 1. The client sends `POST /v1/chat/completions` (or `/v1/completions`, `/v1/embeddings`) with `Authorization: Bearer sk-oai-...` and `model: publishers/<namespace>/models/<name>`.
 2. Envoy removes routing and endpoint headers the client may have sent.
@@ -86,7 +94,7 @@ roles/         one Ansible role per component
   maas_grafana/files/gen-dashboards.py  renders the Grafana dashboards
 sync/          desired users and subscriptions; the real set in sync/local/ (gitignored)
 clusters/      one inventory per cluster: the namespace and the apps domain
-docs/          diagrams from the earlier prototype (not used by this README)
+docs/          architecture and request-path diagrams (from the demo slides)
 tests/         unit tests and the governance render fixtures
 build.sh       installs the Ansible collections, checks the build and runs the tests
 forward.sh     consoles on localhost, until Ctrl-C
