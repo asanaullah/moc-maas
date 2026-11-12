@@ -10,6 +10,24 @@
     fail_msg: set maas_action to one of help, init, groups, group-create, group-delete, users, user-groups, user-create, user-delete, add, remove, usage-client, oidc-client, sync
     quiet: true
 
+- name: Remember which actions are audited
+  ansible.builtin.set_fact:
+    _maas_sso_audited: ['group-create', 'group-delete', 'user-create', 'user-delete', 'add', 'remove']
+
+- name: Who is running this
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: authentication.k8s.io/v1
+      kind: SelfSubjectReview
+  register: _maas_ssr
+  when: maas_action in _maas_sso_audited
+
+- name: Remember the operator
+  ansible.builtin.set_fact:
+    _maas_actor: "{{ _maas_ssr.result.status.userInfo.username | default('') }}"
+  when: maas_action in _maas_sso_audited
+
 - name: Find a running Keycloak pod
   ansible.builtin.include_role:
     name: maas_common

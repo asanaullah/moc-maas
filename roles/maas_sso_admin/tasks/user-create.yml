@@ -21,6 +21,16 @@
   register: _maas_kcadm
   no_log: true
 
+- name: Record the action
+  ansible.builtin.include_role:
+    name: maas_admin
+    tasks_from: audit-write.yml
+  vars:
+    _maas_action: user-create
+    _maas_target: "user/{{ maas_user }}"
+    _maas_details:
+      group: "{{ maas_group }}"
+
 - name: Report
   ansible.builtin.debug:
     msg: "{{ _maas_kcadm.stdout_lines }}"

@@ -17,6 +17,16 @@
     command: "bash /tmp/maas-kcadm.sh add {{ maas_email }} {{ maas_group }}"
   register: _maas_kcadm
 
+- name: Record the action
+  ansible.builtin.include_role:
+    name: maas_admin
+    tasks_from: audit-write.yml
+  vars:
+    _maas_action: membership-add
+    _maas_target: "user/{{ maas_email }}"
+    _maas_details:
+      group: "{{ maas_group }}"
+
 - name: Report
   ansible.builtin.debug:
     msg: "{{ _maas_kcadm.stdout_lines }}"

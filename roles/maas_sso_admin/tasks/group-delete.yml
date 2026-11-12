@@ -16,6 +16,16 @@
   register: _maas_kcadm
   failed_when: _maas_kcadm.rc != 0 and 'no group' not in _maas_kcadm.stderr
 
+- name: Record the action
+  ansible.builtin.include_role:
+    name: maas_admin
+    tasks_from: audit-write.yml
+  vars:
+    _maas_action: group-delete
+    _maas_target: "group/{{ maas_group }}"
+    _maas_details: {}
+  when: _maas_kcadm.rc == 0
+
 - name: Report
   ansible.builtin.debug:
     msg: "{{ _maas_kcadm.stdout_lines }}"
