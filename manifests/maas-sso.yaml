@@ -174,7 +174,9 @@ spec:
         app.kubernetes.io/part-of: maas-test
         app: maas-sso
     spec:
-      automountServiceAccountToken: false
+      # Keycloak's JDBC root and the proxy read service-ca.crt from the
+      # ServiceAccount mount.
+      automountServiceAccountToken: true
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
