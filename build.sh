@@ -75,8 +75,16 @@ EXPECTED_ROUTES = ["maas-gateway", "maas-sso", "maas-usage"]
 INTERNAL = {"maas-db", "maas-sso-db", "maas-kube", "maas-redis", "maas-limitador",
             "maas-epp", "maas-ipp-pre", "maas-ipp-post", "maas-prometheus",
             "maas-thanos-query", "maas-thanos-store"}
-# Pods that need the Kubernetes API token, with the reason.
-AUTOMOUNT = {"maas-epp": "leader election and InferencePool discovery"}
+# Pods that need the ServiceAccount mount, with the reason. Most read
+# service-ca.crt from it; the EPP uses the token for the Kubernetes API.
+AUTOMOUNT = {
+    "maas-epp": "leader election and InferencePool discovery",
+    "maas-sso": "Keycloak JDBC and the proxy read service-ca.crt from the ServiceAccount mount",
+    "maas-prometheus": "the model, Keycloak and maas-kube scrape jobs read the service CA from the mount",
+    "maas-thanos-query": "the gRPC client CA for the Prometheus sidecar and the store",
+    "maas-db-backup": "PGSSLROOTCERT from the ServiceAccount mount",
+    "maas-sso-db-backup": "PGSSLROOTCERT from the ServiceAccount mount",
+}
 # Extra capabilities, keyed by (workload, container, capability), with the reason.
 ADD_CAPS = {}
 # Jinja markers, not Go templates: the Prometheus alert annotations keep

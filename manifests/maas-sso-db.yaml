@@ -112,7 +112,8 @@ spec:
             app: maas-sso-db-backup
         spec:
           restartPolicy: Never
-          automountServiceAccountToken: false
+          # PGSSLROOTCERT comes from the ServiceAccount mount.
+          automountServiceAccountToken: true
           containers:
             - name: pg-dump
               image: registry.redhat.io/rhel9/postgresql-16@sha256:9223bb5f0745e66f0e4204ff87d4d1a5283f3726e9b7d9b71d7bdb2a650fc218

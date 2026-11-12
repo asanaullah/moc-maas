@@ -164,7 +164,9 @@ spec:
         app: maas-prometheus
         maas-metrics: thanos-sidecar
     spec:
-      automountServiceAccountToken: false
+      # The model, Keycloak and maas-kube scrape jobs read service-ca.crt
+      # from the ServiceAccount mount.
+      automountServiceAccountToken: true
       containers:
         - name: prometheus
           image: quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:e9f9d90f665aa34bede233ebfa89d03d5cd0a3c6224af5fd55de2235309a485a
