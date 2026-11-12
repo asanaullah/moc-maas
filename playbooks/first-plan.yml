@@ -11,6 +11,11 @@
 - name: First subscription
   hosts: localhost
   gather_facts: false
+  pre_tasks:
+    - name: Check the deployment target
+      ansible.builtin.include_role:
+        name: maas_common
+        tasks_from: preflight
   vars:
     maas_group: maas-standard
     maas_subscription: standard

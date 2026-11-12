@@ -38,6 +38,7 @@ spec:
         app.kubernetes.io/part-of: maas-test
         app: maas-db
     spec:
+      automountServiceAccountToken: false
       containers:
         - name: postgres
           image: registry.redhat.io/rhel9/postgresql-16@sha256:9223bb5f0745e66f0e4204ff87d4d1a5283f3726e9b7d9b71d7bdb2a650fc218
@@ -128,6 +129,7 @@ spec:
             app: maas-db-backup
         spec:
           restartPolicy: Never
+          automountServiceAccountToken: false
           containers:
             - name: pg-dump
               image: registry.redhat.io/rhel9/postgresql-16@sha256:9223bb5f0745e66f0e4204ff87d4d1a5283f3726e9b7d9b71d7bdb2a650fc218

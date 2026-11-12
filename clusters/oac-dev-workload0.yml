@@ -10,3 +10,9 @@ all:
     maas_namespace: uat-project
     maas_apps_domain: apps.oac-dev-workload0.hcp.oac.int.massopen.cloud
     maas_s3_endpoint: s3.oac-dev-workload0.hcp.oac.int.massopen.cloud
+    # The target guard refuses any other API server. This dev inventory
+    # confirms its own changes; a production inventory must leave
+    # maas_confirm_deploy false and pass -e maas_confirm_deploy=true per run.
+    maas_expected_oc_server: "https://api-external-oac-dev-workload0.hcp.oac.int.massopen.cloud:6443"
+    maas_protected_oc_server: ""
+    maas_confirm_deploy: true

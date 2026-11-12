@@ -1,0 +1,37 @@
+# Assisted by Claude Opus
+# Refuses to change the wrong cluster. Included first by every playbook that
+# mutates the namespace. tests/preflight-guard.yml overrides the server so the
+# build exercises the three refusals without contacting a cluster.
+- name: Read the connected cluster
+  ansible.builtin.command: oc whoami --show-server
+  register: _maas_oc_server_command
+  changed_when: false
+  when: maas_oc_server_override is not defined
+
+- name: Remember the connected cluster
+  ansible.builtin.set_fact:
+    _maas_oc_server: "{{ (maas_oc_server_override if maas_oc_server_override is defined else _maas_oc_server_command.stdout) | trim }}"
+
+- name: Require the expected server
+  ansible.builtin.assert:
+    that: maas_expected_oc_server | length > 0
+    fail_msg: "refusing: set maas_expected_oc_server in the inventory"
+    quiet: true
+
+- name: Check the cluster is the expected one
+  ansible.builtin.assert:
+    that: _maas_oc_server == maas_expected_oc_server
+    fail_msg: "refusing: connected to {{ _maas_oc_server }}, expected {{ maas_expected_oc_server }}"
+    quiet: true
+
+- name: Refuse the protected server
+  ansible.builtin.assert:
+    that: maas_protected_oc_server | length == 0 or _maas_oc_server != maas_protected_oc_server
+    fail_msg: "refusing: {{ _maas_oc_server }} is the protected server"
+    quiet: true
+
+- name: Require the deployment confirmation
+  ansible.builtin.assert:
+    that: maas_confirm_deploy | default(false) | bool
+    fail_msg: "refusing: pass -e maas_confirm_deploy=true to change this cluster"
+    quiet: true

@@ -1,0 +1,22 @@
+# Assisted by Claude Opus
+# Three offline cases for the deployment target guard; build.sh runs all
+# three and expects a distinct failure for each. The server comes from
+# maas_oc_server_override, so no cluster is contacted.
+- name: Deployment guard case
+  hosts: localhost
+  gather_facts: false
+  vars:
+    maas_oc_server_override: "https://guard.example:6443"
+    maas_expected_oc_server: >-
+      {{ {'mismatch': 'https://other.example:6443',
+          'protected': 'https://guard.example:6443',
+          'noconfirm': 'https://guard.example:6443'}[guard_case] }}
+    maas_protected_oc_server: >-
+      {{ {'mismatch': '', 'protected': 'https://guard.example:6443',
+          'noconfirm': ''}[guard_case] }}
+    maas_confirm_deploy: "{{ guard_case != 'noconfirm' }}"
+  tasks:
+    - name: Include the preflight
+      ansible.builtin.include_role:
+        name: maas_common
+        tasks_from: preflight

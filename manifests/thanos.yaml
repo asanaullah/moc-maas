@@ -32,6 +32,7 @@ spec:
         app: maas-thanos-store
         maas-metrics: thanos
     spec:
+      automountServiceAccountToken: false
       containers:
         - name: store
           image: quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:a493512f8444a93cac0431f959309cf0d0559a513ec87ea297bab97ea2198126
@@ -106,6 +107,7 @@ spec:
         app.kubernetes.io/part-of: maas-test
         app: maas-thanos-query
     spec:
+      automountServiceAccountToken: false
       containers:
         - name: query
           image: quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:a493512f8444a93cac0431f959309cf0d0559a513ec87ea297bab97ea2198126
@@ -170,6 +172,7 @@ spec:
         app: maas-thanos-compact
         maas-metrics: thanos
     spec:
+      automountServiceAccountToken: false
       containers:
         - name: compact
           image: quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:a493512f8444a93cac0431f959309cf0d0559a513ec87ea297bab97ea2198126

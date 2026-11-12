@@ -78,6 +78,8 @@ spec:
     spec:
       # From manifests/prereqs: read access to the pool and its pods.
       serviceAccountName: uat-epp
+      # Leader election and InferencePool discovery need the API token.
+      automountServiceAccountToken: true
       # Best effort: spread the two replicas over nodes when the cluster has
       # more than one, but still schedule both on a single-node cluster.
       affinity:

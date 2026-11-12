@@ -41,6 +41,12 @@ python="$(ansible --version | sed -n 's/^  python version = .*(\(.*\))$/\1/p')"
   exit 1
 }
 
+echo "== shell syntax"
+while IFS= read -r script; do
+  bash -n "$script"
+  echo "  ok  $script"
+done < <(git ls-files '*.sh' ':(exclude)collections/**')
+
 echo "== syntax"
 cluster="$(ls clusters/*.yml | head -1)"
 for playbook in playbooks/*.yml; do
@@ -51,9 +57,10 @@ done
 
 echo "== manifests"
 # The manifests are templates on the inventory vars; render them for a made-up
-# namespace to catch broken Jinja or YAML before a deploy does.
+# namespace to catch broken Jinja or YAML before a deploy does. The same pass
+# enforces the public surface and the pod security baseline.
 "${python:-python3}" - <<'EOF'
-import glob, sys, yaml
+import glob, re, sys, yaml
 from jinja2 import Template
 
 VARS = yaml.safe_load(open("roles/maas_common/defaults/main.yml")) or {}
@@ -63,18 +70,99 @@ VARS.update({"maas_namespace": "build-check", "maas_apps_domain": "apps.build-ch
         "maas_kube_crd_configmaps": ["maas-kube-crd-build-check"], "maas_kube_crd_hash": "build-check",
         "maas_governance_models": [{"name": "maas-sim", "publisher_id": "publishers/build-check/models/maas-sim"}],
         "maas_wasm_config_json": '{"services":{},"actionSets":[]}'})
+
+EXPECTED_ROUTES = ["maas-gateway", "maas-sso", "maas-usage"]
+INTERNAL = {"maas-db", "maas-sso-db", "maas-kube", "maas-redis", "maas-limitador",
+            "maas-epp", "maas-ipp-pre", "maas-ipp-post", "maas-prometheus",
+            "maas-thanos-query", "maas-thanos-store"}
+# Pods that need the Kubernetes API token, with the reason.
+AUTOMOUNT = {"maas-epp": "leader election and InferencePool discovery"}
+# Extra capabilities, keyed by (workload, container, capability), with the reason.
+ADD_CAPS = {}
+# Jinja markers, not Go templates: the Prometheus alert annotations keep
+# {{ $labels.job }} on purpose.
+JINJA = re.compile(r"\{\{\s*[A-Za-z_][A-Za-z0-9_.]*\s*[}|.]|\{%")
+
+
+def fail(message):
+    sys.exit("FAIL  " + message)
+
+
+def pod_spec(doc):
+    kind = doc.get("kind")
+    if kind == "Pod":
+        return doc.get("spec") or {}
+    if kind in ("Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "Job"):
+        return ((doc.get("spec") or {}).get("template") or {}).get("spec") or {}
+    if kind == "CronJob":
+        job = ((doc.get("spec") or {}).get("jobTemplate") or {}).get("spec") or {}
+        return (job.get("template") or {}).get("spec") or {}
+    return None
+
+
+routes, services = [], []
 for path in sorted(glob.glob("manifests/*.yaml")):
-    docs = [d for d in yaml.safe_load_all(Template(open(path).read()).render(**VARS)) if d]
+    text = Template(open(path).read()).render(**VARS)
+    if JINJA.search(text):
+        fail(f"{path}: rendered output still contains a Jinja marker")
+    docs = [d for d in yaml.safe_load_all(text) if d]
     if not docs:
-        sys.exit(f"{path}: renders to nothing")
+        fail(f"{path}: renders to nothing")
+    for doc in docs:
+        kind = doc.get("kind")
+        name = (doc.get("metadata") or {}).get("name", "?")
+        if kind == "Route":
+            routes.append(name)
+            target = ((doc.get("spec") or {}).get("to") or {}).get("name")
+            if target in INTERNAL:
+                fail(f"{path}: Route {name} targets internal service {target}")
+        if kind == "Service":
+            stype = (doc.get("spec") or {}).get("type", "ClusterIP")
+            services.append((name, stype))
+            if stype in ("LoadBalancer", "NodePort"):
+                fail(f"{path}: Service {name} is {stype}")
+        spec = pod_spec(doc)
+        if spec is None:
+            continue
+        if spec.get("hostNetwork"):
+            fail(f"{path}: {kind} {name} uses hostNetwork")
+        for volume in spec.get("volumes") or []:
+            if "hostPath" in volume:
+                fail(f"{path}: {kind} {name} mounts hostPath {volume['hostPath']}")
+        if spec.get("automountServiceAccountToken") is not False and name not in AUTOMOUNT:
+            fail(f"{path}: {kind} {name} does not set automountServiceAccountToken: false")
+        for container in (spec.get("containers") or []) + (spec.get("initContainers") or []):
+            cname = container.get("name", "?")
+            image = container.get("image") or ""
+            if image and "@sha256:" not in image:
+                fail(f"{path}: {kind} {name} container {cname} image is not digest-pinned: {image}")
+            sc = container.get("securityContext") or {}
+            if sc.get("privileged"):
+                fail(f"{path}: {kind} {name} container {cname} is privileged")
+            if sc:
+                if sc.get("allowPrivilegeEscalation") is not False:
+                    fail(f"{path}: {kind} {name} container {cname} does not set allowPrivilegeEscalation: false")
+                if (sc.get("seccompProfile") or {}).get("type") != "RuntimeDefault":
+                    fail(f"{path}: {kind} {name} container {cname} does not set seccompProfile.type: RuntimeDefault")
+                caps = sc.get("capabilities") or {}
+                if "ALL" not in {str(v).upper() for v in caps.get("drop") or []}:
+                    fail(f"{path}: {kind} {name} container {cname} does not drop ALL capabilities")
+                for cap in caps.get("add") or []:
+                    if (name, cname, str(cap)) not in ADD_CAPS:
+                        fail(f"{path}: {kind} {name} container {cname} adds capability {cap} without an allowlist reason")
     print(f"  ok  {path} ({len(docs)} objects)")
+
+if sorted(routes) != EXPECTED_ROUTES:
+    fail(f"Routes {sorted(routes)} do not match {EXPECTED_ROUTES}")
+if {stype for _, stype in services} != {"ClusterIP"}:
+    fail("not every Service is ClusterIP")
+print(f"  ok  {len(routes)} Routes, {len(services)} ClusterIP Services, security baseline")
 EOF
 
 echo "== python files"
-python3 -m py_compile roles/maas_usage/files/portal.py roles/maas_smoke/files/smoke.py \
-  roles/maas_grafana/files/gen-dashboards.py roles/maas_admin/files/governance_edit.py \
-  roles/maas_sync/files/sync_plan.py maas-tui.py
-echo "  ok"
+mapfile -t python_files < <(git ls-files '*.py' ':(exclude)collections/**')
+python3 -m py_compile "${python_files[@]}"
+echo "  ok  ${#python_files[@]} files"
 
 echo "== unit tests"
 out="$(python3 -m unittest discover -s tests 2>&1)" || { echo "$out" | grep -v '"POST /check' >&2; exit 1; }
@@ -101,6 +189,36 @@ for f in tests/fixtures/bad-*.yaml; do
     exit 1
   fi
   echo "  ok  $(basename "$f")"
+done
+
+echo "== deploy guard"
+for case in mismatch protected noconfirm; do
+  if ansible-playbook -i "$cluster" tests/preflight-guard.yml -e "guard_case=$case" >"$tmp/guard-out" 2>&1; then
+    echo "  FAIL  guard case $case was accepted" >&2
+    exit 1
+  fi
+  case "$case" in
+    mismatch) pattern="expected https://other.example:6443" ;;
+    protected) pattern="is the protected server" ;;
+    noconfirm) pattern="maas_confirm_deploy=true" ;;
+  esac
+  if ! grep -qF "$pattern" "$tmp/guard-out"; then
+    echo "  FAIL  guard case $case did not report: $pattern" >&2
+    cat "$tmp/guard-out" >&2
+    exit 1
+  fi
+  echo "  ok  $case"
+done
+for playbook in playbooks/deploy.yml playbooks/teardown.yml playbooks/admin.yml \
+                playbooks/sso-admin.yml playbooks/sync.yml playbooks/backup-now.yml \
+                playbooks/restore-test.yml playbooks/first-plan.yml \
+                playbooks/github-secret.yml playbooks/smoke-test.yml \
+                playbooks/test-gateway.yml; do
+  grep -q "tasks_from: preflight" "$playbook" || {
+    echo "  FAIL  $playbook does not include the preflight" >&2
+    exit 1
+  }
+  echo "  ok  $(basename "$playbook")"
 done
 
 echo "== envoy"
