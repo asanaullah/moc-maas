@@ -84,6 +84,7 @@ AUTOMOUNT = {
     "maas-thanos-query": "the gRPC client CA for the Prometheus sidecar and the store",
     "maas-db-backup": "PGSSLROOTCERT from the ServiceAccount mount",
     "maas-sso-db-backup": "PGSSLROOTCERT from the ServiceAccount mount",
+    "maas-usage": "the portal's database TLS root comes from the ServiceAccount mount",
 }
 # Extra capabilities, keyed by (workload, container, capability), with the reason.
 ADD_CAPS = {}

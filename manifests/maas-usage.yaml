@@ -23,10 +23,10 @@ spec:
         app.kubernetes.io/part-of: maas-test
         app: maas-usage
     spec:
-      # No Kubernetes rights needed; it talks to its database, Keycloak,
-      # Limitador and Thanos Query.
+      # No Kubernetes rights needed, but the database TLS root comes from
+      # the ServiceAccount mount.
       serviceAccountName: maas-keys
-      automountServiceAccountToken: false
+      automountServiceAccountToken: true
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
