@@ -1,4 +1,7 @@
 # Assisted by Claude Opus
+# The objects a fresh install starts with: the model ref and the base
+# subscriptions and their access policies. An existing maas-governance
+# ConfigMap is never overwritten, and a teardown without a data wipe keeps it.
 maas_governance_objects:
   - apiVersion: maas.opendatahub.io/v1alpha1
     kind: MaaSModelRef
@@ -10,3 +13,115 @@ maas_governance_objects:
       modelRef:
         kind: LLMInferenceService
         name: maas-sim
+  - apiVersion: maas.opendatahub.io/v1alpha1
+    kind: MaaSSubscription
+    metadata:
+      name: tui-chat
+    spec:
+      owner:
+        groups:
+          - name: tui-chat
+        users: []
+      priority: 30
+      modelRefs:
+        - name: maas-sim
+          namespace: "{{ maas_namespace }}"
+          tokenRateLimits:
+            - limit: 10000
+              window: 60s
+  - apiVersion: maas.opendatahub.io/v1alpha1
+    kind: MaaSAuthPolicy
+    metadata:
+      name: tui-chat-access
+    spec:
+      subjects:
+        groups:
+          - name: tui-chat
+        users: []
+      modelRefs:
+        - name: maas-sim
+          namespace: "{{ maas_namespace }}"
+  - apiVersion: maas.opendatahub.io/v1alpha1
+    kind: MaaSSubscription
+    metadata:
+      name: tui-tool-call
+    spec:
+      owner:
+        groups:
+          - name: tui-tool-call
+        users: []
+      priority: 20
+      modelRefs:
+        - name: maas-sim
+          namespace: "{{ maas_namespace }}"
+          tokenRateLimits:
+            - limit: 100000
+              window: 60s
+  - apiVersion: maas.opendatahub.io/v1alpha1
+    kind: MaaSAuthPolicy
+    metadata:
+      name: tui-tool-call-access
+    spec:
+      subjects:
+        groups:
+          - name: tui-tool-call
+        users: []
+      modelRefs:
+        - name: maas-sim
+          namespace: "{{ maas_namespace }}"
+  - apiVersion: maas.opendatahub.io/v1alpha1
+    kind: MaaSSubscription
+    metadata:
+      name: tui-research
+    spec:
+      owner:
+        groups:
+          - name: tui-research
+        users: []
+      priority: 10
+      modelRefs:
+        - name: maas-sim
+          namespace: "{{ maas_namespace }}"
+          tokenRateLimits:
+            - limit: 30000
+              window: 60s
+  - apiVersion: maas.opendatahub.io/v1alpha1
+    kind: MaaSAuthPolicy
+    metadata:
+      name: tui-research-access
+    spec:
+      subjects:
+        groups:
+          - name: tui-research
+        users: []
+      modelRefs:
+        - name: maas-sim
+          namespace: "{{ maas_namespace }}"
+  - apiVersion: maas.opendatahub.io/v1alpha1
+    kind: MaaSSubscription
+    metadata:
+      name: standard
+    spec:
+      owner:
+        groups:
+          - name: maas-standard
+        users: []
+      priority: 0
+      modelRefs:
+        - name: maas-sim
+          namespace: "{{ maas_namespace }}"
+          tokenRateLimits:
+            - limit: 20000
+              window: 60s
+  - apiVersion: maas.opendatahub.io/v1alpha1
+    kind: MaaSAuthPolicy
+    metadata:
+      name: standard-access
+    spec:
+      subjects:
+        groups:
+          - name: maas-standard
+        users: []
+      modelRefs:
+        - name: maas-sim
+          namespace: "{{ maas_namespace }}"

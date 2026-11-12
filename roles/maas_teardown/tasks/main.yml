@@ -20,12 +20,33 @@
     - {kind: Deployment, api: apps/v1}
     - {kind: StatefulSet, api: apps/v1}
     - {kind: Service, api: v1}
-    - {kind: ConfigMap, api: v1}
     - {kind: CronJob, api: batch/v1}
     - {kind: Job, api: batch/v1}
     - {kind: InferencePool, api: inference.networking.k8s.io/v1}
   loop_control:
     label: "{{ item.kind }}"
+
+- name: Remember the ConfigMaps to keep
+  ansible.builtin.set_fact:
+    _maas_keep_configmaps: "{{ [] if (maas_wipe_data | default(false) | bool) else ['maas-governance'] }}"
+
+- name: Find the labeled ConfigMaps
+  kubernetes.core.k8s_info:
+    kind: ConfigMap
+    namespace: "{{ maas_namespace }}"
+    label_selectors: ["app.kubernetes.io/part-of={{ maas_part_of }}"]
+  register: _maas_configmaps
+
+- name: Remove the labeled ConfigMaps except the kept ones
+  kubernetes.core.k8s:
+    state: absent
+    namespace: "{{ maas_namespace }}"
+    kind: ConfigMap
+    api_version: v1
+    name: "{{ item.metadata.name }}"
+  loop: "{{ _maas_configmaps.resources | rejectattr('metadata.name', 'in', _maas_keep_configmaps) | list }}"
+  loop_control:
+    label: "{{ item.metadata.name }}"
 
 # Finished pods (backup runs, restore tests) whose Job is already gone; the
 # API's default for Jobs leaves them behind.
@@ -65,11 +86,21 @@
     - {kind: Deployment, api: apps/v1}
     - {kind: StatefulSet, api: apps/v1}
     - {kind: Service, api: v1}
-    - {kind: ConfigMap, api: v1}
     - {kind: CronJob, api: batch/v1}
     - {kind: InferencePool, api: inference.networking.k8s.io/v1}
   loop_control:
     label: "{{ item.kind }}"
+
+- name: Wait for the other labeled ConfigMaps to be gone
+  kubernetes.core.k8s_info:
+    kind: ConfigMap
+    api_version: v1
+    namespace: "{{ maas_namespace }}"
+    label_selectors: ["app.kubernetes.io/part-of={{ maas_part_of }}"]
+  register: _maas_left_configmaps
+  until: _maas_left_configmaps.resources | rejectattr('metadata.name', 'in', _maas_keep_configmaps) | list | length == 0
+  retries: "{{ (maas_rollout_timeout | int / maas_poll_delay | int) | int }}"
+  delay: "{{ maas_poll_delay }}"
 
 - name: Remove the client pod
   kubernetes.core.k8s:
@@ -114,7 +145,8 @@
       The MaaS is removed from {{ maas_namespace }}. Database files and backups
       on the storage volume (maas/) were kept, with the Secrets they need
       (maas-db, maas-db-config, maas-sso-db, maas-sso-admin, maas-usage-oidc,
-      maas-kcadm, the maas-kube token and kubeconfig Secrets) and
+      maas-kcadm, the maas-kube token and kubeconfig Secrets), the
+      maas-governance ConfigMap (model refs and subscriptions), and
       maas-sso-github; the metrics bucket was left alone. Re-run with
       -e maas_wipe_data=true for a fresh install.
   when: not (maas_wipe_data | default(false) | bool)
@@ -123,6 +155,7 @@
   ansible.builtin.debug:
     msg: >-
       The MaaS is removed from {{ maas_namespace }}, and the databases and their
-      generated Secrets were wiped; the next deploy is a fresh install. Backups
-      (maas/), the metrics bucket and maas-sso-github were kept.
+      generated Secrets were wiped; the next deploy seeds the model ref and
+      the base subscriptions from the role defaults. Backups (maas/), the
+      metrics bucket and maas-sso-github were kept.
   when: maas_wipe_data | default(false) | bool
